@@ -195,6 +195,7 @@ Key points for custom nodes:
 - Set `frame(width: node.size.width, height: node.size.height)` to match the node's declared size
 - Use `overlay` with `FlowHandle` views to render connection points at the node edges
 - Use `node.isSelected` to show selection state
+- Use `node.isHovered` to show hover state (mouse over on macOS, pointer hover on iOS)
 - Use `FlowHandle(id, type:, position:)` for each handle in `node.handles`
 
 ## Handling Connections
@@ -343,6 +344,7 @@ store.nodeLookup["node-1"]              // O(1) node access by id
 store.connectionLookup["node-1"]        // O(1) edges for a node
 store.selectedNodeIDs                   // currently selected node IDs
 store.selectedEdgeIDs                   // currently selected edge IDs
+store.hoveredNodeID                     // currently hovered node ID (nil if none)
 ```
 
 ## Serialization
@@ -371,6 +373,7 @@ store.load(document)
 | Connect | Drag from handle to handle | Drag from handle to handle |
 | Select node/edge | Click | Tap |
 | Multi-select | Shift + drag rectangle | Long press + drag |
+| Hover | Mouse over node | Pointer hover |
 | Cursor feedback | Contextual (hand/crosshair/arrow) | N/A |
 
 ## Architecture

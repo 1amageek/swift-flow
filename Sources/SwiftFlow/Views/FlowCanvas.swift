@@ -432,7 +432,17 @@ public struct FlowCanvas<
                     } else if let nodeID = store.hitTestNode(at: canvasPoint),
                               let node = store.nodeLookup[nodeID],
                               node.isDraggable {
-                        dragMode = .nodeMove(nodeID: nodeID, startPosition: node.position)
+                        var startPositions: [String: CGPoint] = [:]
+                        if node.isSelected, store.selectedNodeIDs.count > 1 {
+                            for selectedID in store.selectedNodeIDs {
+                                if let n = store.nodeLookup[selectedID], n.isDraggable {
+                                    startPositions[selectedID] = n.position
+                                }
+                            }
+                        } else {
+                            startPositions[nodeID] = node.position
+                        }
+                        dragMode = .nodeMove(startPositions: startPositions)
                     } else if store.configuration.selectionEnabled,
                               store.configuration.multiSelectionEnabled {
                         let canvasStart = store.viewport.screenToCanvas(value.startLocation)
@@ -454,15 +464,17 @@ public struct FlowCanvas<
                     )
                     store.selectionRect = rect
                     store.selectNodesInRect(rect)
-                case .nodeMove(let nodeID, let startPosition):
+                case .nodeMove(let startPositions):
                     let delta = CGSize(
                         width: value.translation.width / store.viewport.zoom,
                         height: value.translation.height / store.viewport.zoom
                     )
-                    store.moveNode(nodeID, to: CGPoint(
-                        x: startPosition.x + delta.width,
-                        y: startPosition.y + delta.height
-                    ))
+                    for (nodeID, startPosition) in startPositions {
+                        store.moveNode(nodeID, to: CGPoint(
+                            x: startPosition.x + delta.width,
+                            y: startPosition.y + delta.height
+                        ))
+                    }
                 case .connection:
                     store.updateConnection(to: value.location)
                 }
@@ -674,7 +686,7 @@ public struct FlowCanvas<
 private enum CanvasDragMode {
     case none
     case selection(origin: CGPoint)
-    case nodeMove(nodeID: String, startPosition: CGPoint)
+    case nodeMove(startPositions: [String: CGPoint])
     case connection(HandleHitResult)
 }
 

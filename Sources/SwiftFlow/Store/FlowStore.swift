@@ -28,6 +28,15 @@ public final class FlowStore<Data: Sendable & Hashable> {
     var connectionDraft: ConnectionDraft?
     var selectionRect: SelectionRect?
 
+    // MARK: - Animation State
+
+    private var viewportAnimations: (x: PropertyAnimation?, y: PropertyAnimation?, zoom: PropertyAnimation?) = (nil, nil, nil)
+    private var zoomAnchorState: (anchor: CGPoint, initialOffset: CGPoint, initialZoom: CGFloat)?
+    private var nodePositionAnimations: [String: (x: PropertyAnimation, y: PropertyAnimation)] = [:]
+    public private(set) var edgeDashPhase: CGFloat = 0
+    private var animationTask: Task<Void, Never>?
+    private var hasAnimatedEdges: Bool = false
+
     // MARK: - Undo
 
     public var undoManager: UndoManager?
@@ -55,6 +64,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         self.configuration = configuration
         rebuildNodeLookup()
         rebuildConnectionLookup()
+        updateAnimatedEdgesFlag()
     }
 
     // MARK: - Node Operations
@@ -72,6 +82,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     public func removeNode(_ nodeID: String) {
+        nodePositionAnimations.removeValue(forKey: nodeID)
         let capturedNode = nodeLookup[nodeID]
         let cascadedEdges = edges.filter { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
 
@@ -86,6 +97,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
         edges.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
         rebuildConnectionLookup()
+        updateAnimatedEdgesFlag()
 
         for edge in cascadedEdges {
             selectedEdgeIDs.remove(edge.id)
@@ -112,6 +124,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     public func moveNode(_ nodeID: String, to position: CGPoint) {
+        nodePositionAnimations.removeValue(forKey: nodeID)
         let snapped = configuration.snapped(position)
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
         nodes[index].position = snapped
@@ -215,6 +228,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
         connectionLookup[edge.sourceNodeID, default: []].append(edge)
         connectionLookup[edge.targetNodeID, default: []].append(edge)
         onEdgesChange?([.add(edge)])
+        updateAnimatedEdgesFlag()
+        startAnimationLoopIfNeeded()
         let captured = edge
         registerUndo(actionName: "Add Edge") { store in
             store.removeEdge(captured.id)
@@ -230,6 +245,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         selectedEdgeIDs.remove(edgeID)
 
         onEdgesChange?([.remove(edgeID: edgeID)])
+        updateAnimatedEdgesFlag()
 
         if let capturedEdge {
             registerUndo(actionName: "Remove Edge") { store in
@@ -400,12 +416,17 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     public func pan(by delta: CGSize) {
         guard configuration.panEnabled else { return }
+        viewportAnimations.x = nil
+        viewportAnimations.y = nil
+        zoomAnchorState = nil
         viewport.offset.x += delta.width
         viewport.offset.y += delta.height
     }
 
     public func zoom(by factor: CGFloat, anchor: CGPoint) {
         guard configuration.zoomEnabled else { return }
+        viewportAnimations = (nil, nil, nil)
+        zoomAnchorState = nil
         let oldZoom = viewport.zoom
         guard oldZoom > 0 else { return }
         let newZoom = max(
@@ -420,6 +441,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     public func fitToContent(canvasSize: CGSize, padding: CGFloat = 50) {
         guard !nodes.isEmpty else { return }
+        viewportAnimations = (nil, nil, nil)
+        zoomAnchorState = nil
         let bounds = nodeBounds()
         let contentWidth = bounds.width + padding * 2
         let contentHeight = bounds.height + padding * 2
@@ -431,6 +454,202 @@ public final class FlowStore<Data: Sendable & Hashable> {
             x: -bounds.minX * viewport.zoom + (canvasSize.width - bounds.width * viewport.zoom) / 2,
             y: -bounds.minY * viewport.zoom + (canvasSize.height - bounds.height * viewport.zoom) / 2
         )
+    }
+
+    // MARK: - Animated API
+
+    /// Sets the viewport with an animation.
+    public func setViewport(_ newViewport: Viewport, animation: FlowAnimation) {
+        zoomAnchorState = nil
+        let timing = animation.timing
+
+        if var anim = viewportAnimations.x {
+            anim.retarget(to: newViewport.offset.x)
+            viewportAnimations.x = anim
+        } else {
+            viewportAnimations.x = PropertyAnimation(from: viewport.offset.x, to: newViewport.offset.x, timing: timing)
+        }
+
+        if var anim = viewportAnimations.y {
+            anim.retarget(to: newViewport.offset.y)
+            viewportAnimations.y = anim
+        } else {
+            viewportAnimations.y = PropertyAnimation(from: viewport.offset.y, to: newViewport.offset.y, timing: timing)
+        }
+
+        if var anim = viewportAnimations.zoom {
+            anim.retarget(to: newViewport.zoom)
+            viewportAnimations.zoom = anim
+        } else {
+            viewportAnimations.zoom = PropertyAnimation(from: viewport.zoom, to: newViewport.zoom, timing: timing)
+        }
+
+        startAnimationLoopIfNeeded()
+    }
+
+    /// Zooms by a factor around an anchor point with an animation.
+    /// Offset is derived from zoom each frame to keep the anchor point stable.
+    public func zoom(by factor: CGFloat, anchor: CGPoint, animation: FlowAnimation) {
+        guard configuration.zoomEnabled else { return }
+        let oldZoom = viewport.zoom
+        guard oldZoom > 0 else { return }
+        let newZoom = max(configuration.minZoom, min(configuration.maxZoom, oldZoom * factor))
+
+        // Store anchor context so offset can be derived from zoom each frame
+        zoomAnchorState = (anchor: anchor, initialOffset: viewport.offset, initialZoom: oldZoom)
+
+        // Clear independent offset animations — offset will be computed from zoom
+        viewportAnimations.x = nil
+        viewportAnimations.y = nil
+
+        let timing = animation.timing
+        if var anim = viewportAnimations.zoom {
+            anim.retarget(to: newZoom)
+            viewportAnimations.zoom = anim
+        } else {
+            viewportAnimations.zoom = PropertyAnimation(from: oldZoom, to: newZoom, timing: timing)
+        }
+
+        startAnimationLoopIfNeeded()
+    }
+
+    /// Fits the viewport to show all nodes with an animation.
+    public func fitToContent(canvasSize: CGSize, padding: CGFloat = 50, animation: FlowAnimation) {
+        guard !nodes.isEmpty else { return }
+        let bounds = nodeBounds()
+        let contentWidth = bounds.width + padding * 2
+        let contentHeight = bounds.height + padding * 2
+        guard contentWidth > 0, contentHeight > 0 else { return }
+
+        let fitted = min(canvasSize.width / contentWidth, canvasSize.height / contentHeight)
+        let targetZoom = max(configuration.minZoom, min(configuration.maxZoom, min(1.0, fitted)))
+        let targetOffset = CGPoint(
+            x: -bounds.minX * targetZoom + (canvasSize.width - bounds.width * targetZoom) / 2,
+            y: -bounds.minY * targetZoom + (canvasSize.height - bounds.height * targetZoom) / 2
+        )
+        let target = Viewport(offset: targetOffset, zoom: targetZoom)
+        setViewport(target, animation: animation)
+    }
+
+    /// Animates multiple node positions simultaneously.
+    public func setNodePositions(_ positions: [String: CGPoint], animation: FlowAnimation) {
+        let timing = animation.timing
+
+        for (nodeID, targetPos) in positions {
+            let snapped = configuration.snapped(targetPos)
+            guard let node = nodeLookup[nodeID] else { continue }
+
+            if var existing = nodePositionAnimations[nodeID] {
+                existing.x.retarget(to: snapped.x)
+                existing.y.retarget(to: snapped.y)
+                nodePositionAnimations[nodeID] = existing
+            } else {
+                nodePositionAnimations[nodeID] = (
+                    x: PropertyAnimation(from: node.position.x, to: snapped.x, timing: timing),
+                    y: PropertyAnimation(from: node.position.y, to: snapped.y, timing: timing)
+                )
+            }
+        }
+
+        startAnimationLoopIfNeeded()
+    }
+
+    // MARK: - Animation Loop
+
+    /// Whether any animation is currently in progress.
+    var isAnimating: Bool {
+        viewportAnimations.x != nil || viewportAnimations.y != nil || viewportAnimations.zoom != nil
+        || !nodePositionAnimations.isEmpty
+        || hasAnimatedEdges
+    }
+
+    private func startAnimationLoopIfNeeded() {
+        guard animationTask == nil else { return }
+        animationTask = Task { [weak self] in
+            var lastTime = ContinuousClock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(8))
+                guard let self else { return }
+                let now = ContinuousClock.now
+                let dt = (now - lastTime).timeInterval
+                lastTime = now
+                self.tickAnimations(dt: dt)
+                if !self.isAnimating {
+                    break
+                }
+            }
+            guard let self else { return }
+            self.animationTask = nil
+        }
+    }
+
+    private func tickAnimations(dt: TimeInterval) {
+        tickViewportAnimations(dt: dt)
+        tickNodePositionAnimations(dt: dt)
+        tickEdgeDashPhase(dt: dt)
+    }
+
+    private func tickViewportAnimations(dt: TimeInterval) {
+        if var anim = viewportAnimations.x {
+            anim.tick(dt: dt)
+            viewport.offset.x = anim.current
+            if anim.settled { viewportAnimations.x = nil } else { viewportAnimations.x = anim }
+        }
+        if var anim = viewportAnimations.y {
+            anim.tick(dt: dt)
+            viewport.offset.y = anim.current
+            if anim.settled { viewportAnimations.y = nil } else { viewportAnimations.y = anim }
+        }
+        if var anim = viewportAnimations.zoom {
+            anim.tick(dt: dt)
+            viewport.zoom = anim.current
+
+            // Derive offset from zoom to keep anchor stable
+            if let anchor = zoomAnchorState {
+                let scale = anim.current / anchor.initialZoom
+                viewport.offset.x = anchor.anchor.x - (anchor.anchor.x - anchor.initialOffset.x) * scale
+                viewport.offset.y = anchor.anchor.y - (anchor.anchor.y - anchor.initialOffset.y) * scale
+            }
+
+            if anim.settled {
+                viewportAnimations.zoom = nil
+                zoomAnchorState = nil
+            } else {
+                viewportAnimations.zoom = anim
+            }
+        }
+    }
+
+    private func tickNodePositionAnimations(dt: TimeInterval) {
+        var settled: [String] = []
+        for (nodeID, var anims) in nodePositionAnimations {
+            anims.x.tick(dt: dt)
+            anims.y.tick(dt: dt)
+
+            // Lightweight update: skip callbacks, undo, snap-to-grid
+            if let index = nodes.firstIndex(where: { $0.id == nodeID }) {
+                nodes[index].position = CGPoint(x: anims.x.current, y: anims.y.current)
+                nodeLookup[nodeID] = nodes[index]
+            }
+
+            if anims.x.settled && anims.y.settled {
+                settled.append(nodeID)
+            } else {
+                nodePositionAnimations[nodeID] = anims
+            }
+        }
+        for nodeID in settled {
+            nodePositionAnimations.removeValue(forKey: nodeID)
+        }
+    }
+
+    private func tickEdgeDashPhase(dt: TimeInterval) {
+        guard hasAnimatedEdges else { return }
+        edgeDashPhase += CGFloat(dt) * 30
+    }
+
+    func updateAnimatedEdgesFlag() {
+        hasAnimatedEdges = edges.contains(where: \.isAnimated)
     }
 
     // MARK: - Connection Draft
@@ -705,6 +924,13 @@ extension FlowStore where Data: Codable {
     }
 
     public func load(_ document: FlowDocument<Data>) {
+        animationTask?.cancel()
+        animationTask = nil
+        viewportAnimations = (nil, nil, nil)
+        zoomAnchorState = nil
+        nodePositionAnimations.removeAll()
+        edgeDashPhase = 0
+
         self.nodes = document.nodes
         self.edges = document.edges
         self.viewport = document.viewport
@@ -713,6 +939,7 @@ extension FlowStore where Data: Codable {
         self.hoveredNodeID = nil
         rebuildNodeLookup()
         rebuildConnectionLookup()
+        updateAnimatedEdgesFlag()
         undoManager?.removeAllActions()
     }
 }

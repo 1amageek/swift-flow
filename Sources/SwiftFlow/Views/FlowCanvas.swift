@@ -320,7 +320,7 @@ public struct FlowCanvas<
             context.stroke(normalPath, with: .color(style.strokeColor), style: strokeStyle)
         }
         if !animatedPath.isEmpty {
-            let strokeStyle = StrokeStyle(lineWidth: style.lineWidth, dash: style.animatedDashPattern)
+            let strokeStyle = StrokeStyle(lineWidth: style.lineWidth, dash: style.animatedDashPattern, dashPhase: -store.edgeDashPhase)
             context.stroke(animatedPath, with: .color(style.strokeColor), style: strokeStyle)
         }
         if !selectedPath.isEmpty {
@@ -970,9 +970,9 @@ private struct PreviewNode: View {
                 n("notify", x: 1710, y: 200, title: "Notify", category: "Output",    icon: "bell.fill",            handles: hIn, badge: "3"),
             ],
             edges: [
-                // Entry
-                FlowEdge(id: "e01", sourceNodeID: "webhook", sourceHandleID: "out", targetNodeID: "auth",     targetHandleID: "in"),
-                FlowEdge(id: "e02", sourceNodeID: "auth",    sourceHandleID: "out", targetNodeID: "router",   targetHandleID: "in"),
+                // Entry (animated to show dash phase)
+                FlowEdge(id: "e01", sourceNodeID: "webhook", sourceHandleID: "out", targetNodeID: "auth",     targetHandleID: "in", isAnimated: true),
+                FlowEdge(id: "e02", sourceNodeID: "auth",    sourceHandleID: "out", targetNodeID: "router",   targetHandleID: "in", isAnimated: true),
                 // Fan-out from router
                 FlowEdge(id: "e03", sourceNodeID: "router",  sourceHandleID: "out", targetNodeID: "parse",    targetHandleID: "in", label: "JSON"),
                 FlowEdge(id: "e04", sourceNodeID: "router",  sourceHandleID: "out", targetNodeID: "validate", targetHandleID: "in"),
@@ -1015,12 +1015,86 @@ private struct PreviewNode: View {
             FlowCanvas(store: store) { node in
                 PreviewNode(node)
             }
-            MiniMap(store: store, canvasSize: geometry.size)
-                .padding(12)
+
+            VStack(alignment: .trailing, spacing: 8) {
+                MiniMap(store: store, canvasSize: geometry.size)
+
+                AnimationToolbar(store: store, canvasSize: geometry.size)
+            }
+            .padding(12)
         }
         .onAppear {
             store.fitToContent(canvasSize: geometry.size)
         }
     }
     .frame(minWidth: 800, minHeight: 600)
+}
+
+private struct AnimationToolbar: View {
+
+    let store: FlowStore<PreviewNodeData>
+    let canvasSize: CGSize
+
+    @State private var isScattered = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button {
+                store.fitToContent(canvasSize: canvasSize, animation: .smooth)
+            } label: {
+                Label("Fit", systemImage: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption)
+            }
+
+            Button {
+                store.zoom(by: 1.5, anchor: CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2), animation: .spring())
+            } label: {
+                Label("Zoom In", systemImage: "plus.magnifyingglass")
+                    .font(.caption)
+            }
+
+            Button {
+                store.zoom(by: 0.67, anchor: CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2), animation: .spring())
+            } label: {
+                Label("Zoom Out", systemImage: "minus.magnifyingglass")
+                    .font(.caption)
+            }
+
+            Button {
+                if isScattered {
+                    // Restore original layout
+                    var positions: [String: CGPoint] = [:]
+                    let originalPositions: [(String, CGFloat, CGFloat)] = [
+                        ("webhook", 30, 200), ("auth", 240, 200), ("router", 450, 200),
+                        ("parse", 660, 60), ("transform", 870, 60), ("dbwrite", 1080, 60),
+                        ("validate", 660, 200), ("enrich", 870, 200), ("apicall", 1080, 200),
+                        ("cache", 660, 340), ("queue", 870, 340), ("retry", 1080, 340),
+                        ("merge", 1290, 200), ("format", 1500, 200), ("notify", 1710, 200),
+                    ]
+                    for (id, x, y) in originalPositions {
+                        positions[id] = CGPoint(x: x, y: y)
+                    }
+                    store.setNodePositions(positions, animation: .spring(response: 0.6, dampingFraction: 0.8))
+                } else {
+                    // Scatter nodes randomly
+                    var positions: [String: CGPoint] = [:]
+                    for node in store.nodes {
+                        positions[node.id] = CGPoint(
+                            x: CGFloat.random(in: 0...1500),
+                            y: CGFloat.random(in: 0...600)
+                        )
+                    }
+                    store.setNodePositions(positions, animation: .spring(response: 0.6, dampingFraction: 0.8))
+                }
+                isScattered.toggle()
+            } label: {
+                Label(isScattered ? "Restore" : "Scatter", systemImage: isScattered ? "arrow.uturn.backward" : "sparkles")
+                    .font(.caption)
+            }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
 }

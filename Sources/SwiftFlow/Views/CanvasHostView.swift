@@ -52,7 +52,7 @@ final class CanvasNSHostView<Content: View>: NSView {
         }
         let area = NSTrackingArea(
             rect: bounds,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow],
+            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow],
             owner: self,
             userInfo: nil
         )
@@ -61,11 +61,11 @@ final class CanvasNSHostView<Content: View>: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        let location = flippedLocation(from: event)
-        MainActor.assumeIsolated {
-            let cursor = cursorAt?(location) ?? .arrow
-            cursor.set()
-        }
+        updateCursor(for: event)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        updateCursor(for: event)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -92,6 +92,14 @@ final class CanvasNSHostView<Content: View>: NSView {
         let location = flippedLocation(from: event)
         MainActor.assumeIsolated {
             onMagnify?(event.magnification, location)
+        }
+    }
+
+    private func updateCursor(for event: NSEvent) {
+        let location = flippedLocation(from: event)
+        MainActor.assumeIsolated {
+            let cursor = cursorAt?(location) ?? .arrow
+            cursor.set()
         }
     }
 

@@ -278,10 +278,17 @@ FlowConfiguration(
         dashPattern: [],              // empty = solid line, e.g. [5, 3]
         animatedDashPattern: [5, 5]   // pattern for isAnimated edges
     ),
+    backgroundStyle: BackgroundStyle(
+        pattern: .grid,                // .none | .grid | .dot
+        color: .gray.opacity(0.2),     // line/dot color
+        spacing: 20,                   // grid cell size in canvas points
+        lineWidth: 0.5,               // grid line width (grid pattern only)
+        dotRadius: 1.5                // dot radius (dot pattern only)
+    ),
     snapToGrid: false,                 // snap node positions to grid
     gridSize: 20,                      // grid cell size (when snapToGrid is true)
-    minZoom: 0.1,                      // minimum zoom level
-    maxZoom: 4.0,                      // maximum zoom level
+    minZoom: 0.1,                      // minimum zoom level (clamped to >= 0.01)
+    maxZoom: 4.0,                      // maximum zoom level (clamped to >= minZoom)
     connectionValidator: nil,          // custom ConnectionValidating, nil = DefaultConnectionValidator
     panEnabled: true,                  // allow canvas panning
     zoomEnabled: true,                 // allow canvas zooming

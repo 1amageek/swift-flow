@@ -1,34 +1,51 @@
 import SwiftUI
 
+/// Default node view:
+/// - Clean card with title centered
+/// - Handles protruding on the node border
 public struct DefaultNodeContent<NodeData: Sendable & Hashable>: NodeContent {
 
     public let node: FlowNode<NodeData>
+
+    static var handleInset: CGFloat { FlowHandle.diameter / 2 }
 
     public init(node: FlowNode<NodeData>) {
         self.node = node
     }
 
     public var body: some View {
-        RoundedRectangle(cornerRadius: 8)
-            .fill(.background)
-            .shadow(color: node.isSelected ? .blue.opacity(0.5) : .black.opacity(0.15), radius: node.isSelected ? 4 : 2)
-            .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(node.isSelected ? Color.blue : Color.gray.opacity(0.3), lineWidth: node.isSelected ? 2 : 1)
-            }
-            .overlay {
-                Text(String(describing: node.data))
-                    .font(.caption)
-                    .lineLimit(2)
-            }
-            .overlay {
-                // Handles pinned to node edges
-                ForEach(node.handles, id: \.id) { handle in
-                    FlowHandle(handle.id, type: handle.type, position: handle.position)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: handleAlignment(handle.position))
+        let inset = Self.handleInset
+
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.background)
+                .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
+                .shadow(
+                    color: node.isSelected ? Color.accentColor.opacity(0.35) : .black.opacity(0.08),
+                    radius: node.isSelected ? 8 : 3,
+                    y: node.isSelected ? 0 : 2
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(
+                            node.isSelected ? Color.accentColor : Color.primary.opacity(0.12),
+                            lineWidth: node.isSelected ? 1.5 : 0.5
+                        )
                 }
+                .overlay {
+                    Text(String(describing: node.data))
+                        .font(.system(.subheadline, weight: .medium))
+                        .lineLimit(1)
+                        .foregroundStyle(.primary)
+                }
+                .padding(inset)
+
+            ForEach(node.handles, id: \.id) { handle in
+                FlowHandle(handle.id, type: handle.type, position: handle.position)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: handleAlignment(handle.position))
             }
-            .frame(width: node.size.width, height: node.size.height)
+        }
+        .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
     }
 
     private func handleAlignment(_ position: HandlePosition) -> Alignment {

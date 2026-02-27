@@ -34,8 +34,13 @@ public struct FlowConfiguration: Sendable {
         self.backgroundStyle = backgroundStyle
         self.snapToGrid = snapToGrid
         self.gridSize = gridSize
-        self.minZoom = minZoom
-        self.maxZoom = maxZoom
+
+        // Clamp to safe values: minZoom must be > 0 to avoid division by zero
+        let safeMin = max(minZoom, 0.01)
+        let safeMax = max(maxZoom, safeMin)
+        self.minZoom = safeMin
+        self.maxZoom = safeMax
+
         self.connectionValidator = connectionValidator
         self.panEnabled = panEnabled
         self.zoomEnabled = zoomEnabled

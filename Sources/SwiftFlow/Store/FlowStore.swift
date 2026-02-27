@@ -18,6 +18,10 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public private(set) var nodeLookup: [String: FlowNode<Data>] = [:]
     public private(set) var connectionLookup: [String: [FlowEdge]] = [:]
 
+    /// Indices into `nodes` sorted by zIndex descending (front-to-back) for hit testing.
+    /// Stable: among equal zIndex, later array index (added later) appears first.
+    private(set) var nodeIndicesFrontToBack: [Int] = []
+
     // MARK: - Internal State
 
     var connectionDraft: ConnectionDraft?
@@ -53,12 +57,14 @@ public final class FlowStore<Data: Sendable & Hashable> {
         guard nodeLookup[node.id] == nil else { return }
         nodes.append(node)
         nodeLookup[node.id] = node
+        rebuildSortedNodes()
         onNodesChange?([.add(node)])
     }
 
     public func removeNode(_ nodeID: String) {
         nodes.removeAll { $0.id == nodeID }
         nodeLookup.removeValue(forKey: nodeID)
+        rebuildSortedNodes()
 
         selectedNodeIDs.remove(nodeID)
 
@@ -212,11 +218,12 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     public func zoom(by factor: CGFloat, anchor: CGPoint) {
         guard configuration.zoomEnabled else { return }
+        let oldZoom = viewport.zoom
+        guard oldZoom > 0 else { return }
         let newZoom = max(
             configuration.minZoom,
-            min(configuration.maxZoom, viewport.zoom * factor)
+            min(configuration.maxZoom, oldZoom * factor)
         )
-        let oldZoom = viewport.zoom
         viewport.zoom = newZoom
         let scale = newZoom / oldZoom
         viewport.offset.x = anchor.x - (anchor.x - viewport.offset.x) * scale
@@ -328,10 +335,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
         var bestDistance: CGFloat = threshold
         var bestResult: HandleHitResult?
 
-        // Iterate front-to-back (highest zIndex first) to match visual order
-        let sortedNodes = nodes.sorted { $0.zIndex > $1.zIndex }
-
-        for node in sortedNodes {
+        for index in nodeIndicesFrontToBack {
+            let node = nodes[index]
             for handle in node.handles {
                 let point = handlePoint(for: handle.position, in: node)
                 let distance = hypot(canvasPoint.x - point.x, canvasPoint.y - point.y)
@@ -351,10 +356,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     func hitTestNode(at canvasPoint: CGPoint) -> String? {
-        // Iterate front-to-back (highest zIndex first) to match visual order
-        for node in nodes.sorted(by: { $0.zIndex > $1.zIndex }) {
-            if node.frame.contains(canvasPoint) {
-                return node.id
+        for index in nodeIndicesFrontToBack {
+            if nodes[index].frame.contains(canvasPoint) {
+                return nodes[index].id
             }
         }
         return nil
@@ -420,7 +424,28 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     private func rebuildNodeLookup() {
-        nodeLookup = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        var seen = Set<String>()
+        var deduped: [FlowNode<Data>] = []
+        for node in nodes {
+            if seen.insert(node.id).inserted {
+                deduped.append(node)
+            }
+        }
+        if deduped.count != nodes.count {
+            nodes = deduped
+        }
+        nodeLookup = Dictionary(uniqueKeysWithValues: deduped.map { ($0.id, $0) })
+        rebuildSortedNodes()
+    }
+
+    private func rebuildSortedNodes() {
+        // Stable sort: among equal zIndex, preserve reversed array order (later = front)
+        nodeIndicesFrontToBack = nodes.indices.sorted { lhs, rhs in
+            if nodes[lhs].zIndex != nodes[rhs].zIndex {
+                return nodes[lhs].zIndex > nodes[rhs].zIndex
+            }
+            return lhs > rhs
+        }
     }
 
     private func rebuildConnectionLookup() {

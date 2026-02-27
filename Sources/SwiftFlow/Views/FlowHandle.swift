@@ -2,6 +2,9 @@ import SwiftUI
 
 public struct FlowHandle: View {
 
+    /// Handle diameter used by DefaultNodeContent for layout.
+    static let diameter: CGFloat = 10
+
     let handleID: String
     let type: HandleType
     let position: HandlePosition
@@ -14,7 +17,11 @@ public struct FlowHandle: View {
 
     public var body: some View {
         Circle()
-            .fill(type == .source ? Color.blue : Color.green)
-            .frame(width: 12, height: 12)
+            .fill(Color.gray)
+            .overlay {
+                Circle()
+                    .strokeBorder(.background, lineWidth: 1.5)
+            }
+            .frame(width: Self.diameter, height: Self.diameter)
     }
 }

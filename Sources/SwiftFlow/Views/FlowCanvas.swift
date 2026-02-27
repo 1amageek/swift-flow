@@ -16,6 +16,9 @@ public struct FlowCanvas<
 
     @State private var dragMode: CanvasDragMode = .none
     @State private var lastPanTranslation: CGSize = .zero
+    #if os(macOS)
+    @State private var pushedDragCursor: DragCursorKind?
+    #endif
 
     // MARK: - Magnify State
 
@@ -47,6 +50,11 @@ public struct FlowCanvas<
         .onTapGesture { location in
             handleTap(at: location)
         }
+        .onDisappear {
+            #if os(macOS)
+            releaseDragCursorIfNeeded()
+            #endif
+        }
 
         #if os(macOS)
         CanvasHostView(
@@ -58,24 +66,24 @@ public struct FlowCanvas<
             },
             cursorAt: { location in
                 switch dragMode {
-                case .pan:
-                    return .closedHand
-                case .nodeMove:
+                case .pan, .nodeMove:
                     return .closedHand
                 case .connection:
                     return .crosshair
                 case .none:
-                    let canvasPoint = store.viewport.screenToCanvas(location)
-                    if store.hitTestHandle(at: canvasPoint) != nil {
-                        return .crosshair
-                    }
-                    if let nodeID = store.hitTestNode(at: canvasPoint),
-                       let node = store.nodeLookup[nodeID],
-                       node.isDraggable {
-                        return .openHand
-                    }
-                    return .arrow
+                    break
                 }
+
+                let canvasPoint = store.viewport.screenToCanvas(location)
+                if store.hitTestHandle(at: canvasPoint) != nil {
+                    return .crosshair
+                }
+                if let nodeID = store.hitTestNode(at: canvasPoint),
+                   let node = store.nodeLookup[nodeID],
+                   node.isDraggable {
+                    return .openHand
+                }
+                return .arrow
             }
         ) {
             canvasView
@@ -248,22 +256,29 @@ public struct FlowCanvas<
         let viewport = store.viewport
         let margin: CGFloat = 100
 
-        let sortedNodes = store.nodes.sorted { $0.zIndex < $1.zIndex }
+        // Handle protrusion: resolved symbols include extra space for handles
+        // that sit on the node border (half in, half out).
+        let handleInset = FlowHandle.diameter / 2
 
-        for node in sortedNodes {
+        // Iterate back-to-front (reverse of front-to-back cache) for correct draw order
+        for index in store.nodeIndicesFrontToBack.reversed() {
+            let node = store.nodes[index]
             let screenOrigin = viewport.canvasToScreen(node.position)
-            let screenSize = CGSize(
-                width: node.size.width * viewport.zoom,
-                height: node.size.height * viewport.zoom
+
+            // Expand draw rect to include handle protrusion
+            let drawRect = CGRect(
+                x: screenOrigin.x - handleInset * viewport.zoom,
+                y: screenOrigin.y - handleInset * viewport.zoom,
+                width: (node.size.width + handleInset * 2) * viewport.zoom,
+                height: (node.size.height + handleInset * 2) * viewport.zoom
             )
-            let screenRect = CGRect(origin: screenOrigin, size: screenSize)
 
             // Viewport culling
             let visibleRect = CGRect(origin: .zero, size: canvasSize).insetBy(dx: -margin, dy: -margin)
-            guard visibleRect.intersects(screenRect) else { continue }
+            guard visibleRect.intersects(drawRect) else { continue }
 
             if let resolved = context.resolveSymbol(id: node.id) {
-                context.draw(resolved, in: screenRect)
+                context.draw(resolved, in: drawRect)
             }
         }
     }
@@ -366,6 +381,11 @@ public struct FlowCanvas<
                 case .connection:
                     store.updateConnection(to: value.location)
                 }
+
+                #if os(macOS)
+                syncDragCursor(for: dragMode)
+                applyCursor(for: value.location)
+                #endif
             }
             .onEnded { value in
                 switch dragMode {
@@ -385,6 +405,11 @@ public struct FlowCanvas<
                 }
                 dragMode = .none
                 lastPanTranslation = .zero
+
+                #if os(macOS)
+                syncDragCursor(for: dragMode)
+                applyCursor(for: value.location)
+                #endif
             }
     }
 
@@ -465,6 +490,67 @@ public struct FlowCanvas<
         }
     }
 
+    // MARK: - Cursor (macOS)
+
+    #if os(macOS)
+    private func dragCursorKind(for mode: CanvasDragMode) -> DragCursorKind? {
+        switch mode {
+        case .pan, .nodeMove: .closedHand
+        case .connection: .crosshair
+        case .none: nil
+        }
+    }
+
+    private func syncDragCursor(for mode: CanvasDragMode) {
+        let desired = dragCursorKind(for: mode)
+        if desired != pushedDragCursor {
+            if pushedDragCursor != nil {
+                NSCursor.pop()
+            }
+            if let desired {
+                desired.cursor.push()
+            }
+            pushedDragCursor = desired
+        }
+        if let desired {
+            desired.cursor.set()
+        }
+    }
+
+    private func releaseDragCursorIfNeeded() {
+        if pushedDragCursor != nil {
+            NSCursor.pop()
+            pushedDragCursor = nil
+        }
+    }
+
+    private var dragCursor: NSCursor? {
+        switch dragMode {
+        case .pan: .closedHand
+        case .nodeMove: .closedHand
+        case .connection: .crosshair
+        case .none: nil
+        }
+    }
+
+    private func applyCursor(for location: CGPoint) {
+        if let dragCursor {
+            dragCursor.set()
+            return
+        }
+        let canvasPoint = store.viewport.screenToCanvas(location)
+        if store.hitTestHandle(at: canvasPoint) != nil {
+            NSCursor.crosshair.set()
+        } else if let nodeID = store.hitTestNode(at: canvasPoint),
+                  let node = store.nodeLookup[nodeID],
+                  node.isDraggable {
+            NSCursor.openHand.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+    #endif
+
     // MARK: - Helpers
 
     private func transformedPath(_ path: Path, viewport: Viewport) -> Path {
@@ -502,31 +588,298 @@ private enum CanvasDragMode {
     case connection(HandleHitResult)
 }
 
+#if os(macOS)
+private enum DragCursorKind: Equatable {
+    case closedHand
+    case crosshair
+
+    var cursor: NSCursor {
+        switch self {
+        case .closedHand: .closedHand
+        case .crosshair: .crosshair
+        }
+    }
+}
+#endif
+
 // MARK: - Preview
 
+private struct PreviewNodeData: Sendable, Hashable {
+    let title: String
+    let category: String
+    let icon: String
+    var badge: String?
+    var subtitle: String?
+}
+
+private struct PreviewNodeContent: NodeContent {
+    typealias NodeData = PreviewNodeData
+
+    let node: FlowNode<PreviewNodeData>
+    static var handleInset: CGFloat { FlowHandle.diameter / 2 }
+
+    init(node: FlowNode<PreviewNodeData>) {
+        self.node = node
+    }
+
+    var body: some View {
+        let inset = Self.handleInset
+
+        ZStack {
+            card.padding(inset)
+
+            ForEach(node.handles, id: \.id) { handle in
+                FlowHandle(handle.id, type: handle.type, position: handle.position)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: handleAlignment(handle.position))
+            }
+        }
+        .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
+    }
+
+    // MARK: - Card
+
+    private var card: some View {
+        RoundedRectangle(cornerRadius: 10)
+            .fill(.background)
+            .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
+            .shadow(
+                color: node.isSelected ? Color.accentColor.opacity(0.4) : .black.opacity(0.08),
+                radius: node.isSelected ? 8 : 3,
+                y: node.isSelected ? 0 : 2
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(
+                        node.isSelected ? Color.accentColor : Color.primary.opacity(0.1),
+                        lineWidth: node.isSelected ? 1.5 : 0.5
+                    )
+            }
+            .overlay(alignment: .leading) { cardContent }
+    }
+
+    // MARK: - Content (varies by category)
+
+    @ViewBuilder
+    private var cardContent: some View {
+        switch node.data.category {
+        case "Trigger":
+            triggerContent
+        case "Logic":
+            logicContent
+        case "Network":
+            networkContent
+        case "Output":
+            outputContent
+        default:
+            standardContent
+        }
+    }
+
+    /// Trigger: icon + title + pulsing live indicator
+    private var triggerContent: some View {
+        HStack(spacing: 10) {
+            iconView
+            Text(node.data.title)
+                .font(.system(.subheadline, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+            Circle()
+                .fill(.green)
+                .frame(width: 8, height: 8)
+                .overlay { Circle().stroke(.green.opacity(0.4), lineWidth: 2) }
+        }
+        .padding(.horizontal, 10)
+    }
+
+    /// Logic: centered icon + title (hub-style)
+    private var logicContent: some View {
+        VStack(spacing: 2) {
+            Image(systemName: node.data.icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(categoryColor)
+            Text(node.data.title)
+                .font(.system(.caption, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Network: icon + title + method badge
+    private var networkContent: some View {
+        HStack(spacing: 10) {
+            iconView
+            VStack(alignment: .leading, spacing: 1) {
+                Text(node.data.title)
+                    .font(.system(.subheadline, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+                if let subtitle = node.data.subtitle {
+                    Text(subtitle)
+                        .font(.system(.caption2, weight: .medium))
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+            if let badge = node.data.badge {
+                Text(badge)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(categoryColor, in: Capsule())
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+    }
+
+    /// Output: icon + title + notification count
+    private var outputContent: some View {
+        HStack(spacing: 10) {
+            iconView
+            Text(node.data.title)
+                .font(.system(.subheadline, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+            if let badge = node.data.badge {
+                Text(badge)
+                    .font(.system(.caption2, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 18, minHeight: 18)
+                    .background(categoryColor, in: Circle())
+            }
+        }
+        .padding(.horizontal, 10)
+    }
+
+    /// Standard: icon + title + subtitle
+    private var standardContent: some View {
+        HStack(spacing: 10) {
+            iconView
+            VStack(alignment: .leading, spacing: 1) {
+                Text(node.data.title)
+                    .font(.system(.subheadline, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+                Text(node.data.subtitle ?? node.data.category)
+                    .font(.system(.caption2))
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 8)
+    }
+
+    private var iconView: some View {
+        Image(systemName: node.data.icon)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 30, height: 30)
+            .background(categoryColor, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    // MARK: - Category Color
+
+    private var categoryColor: Color {
+        switch node.data.category {
+        case "Trigger":   .orange
+        case "Security":  .red
+        case "Logic":     .purple
+        case "Data":      .blue
+        case "Transform": .teal
+        case "Storage":   .indigo
+        case "Network":   .cyan
+        case "Queue":     .brown
+        case "Output":    .green
+        default:          .gray
+        }
+    }
+
+    private func handleAlignment(_ position: HandlePosition) -> Alignment {
+        switch position {
+        case .top: .top
+        case .bottom: .bottom
+        case .left: .leading
+        case .right: .trailing
+        }
+    }
+}
+
 #Preview("FlowCanvas") {
-    @Previewable @State var store: FlowStore<String> = {
-        let h = [
-            HandleDeclaration(id: "target", type: .target, position: .left),
-            HandleDeclaration(id: "source", type: .source, position: .right),
+    @Previewable @State var store: FlowStore<PreviewNodeData> = {
+        let hOut: [HandleDeclaration] = [
+            HandleDeclaration(id: "out", type: .source, position: .right),
         ]
-        let store = FlowStore<String>(
+        let hIn: [HandleDeclaration] = [
+            HandleDeclaration(id: "in", type: .target, position: .left),
+        ]
+        let hLR: [HandleDeclaration] = [
+            HandleDeclaration(id: "in", type: .target, position: .left),
+            HandleDeclaration(id: "out", type: .source, position: .right),
+        ]
+
+        let s = CGSize(width: 160, height: 50)
+
+        func n(_ id: String, x: CGFloat, y: CGFloat, title: String, category: String, icon: String, handles: [HandleDeclaration] = hLR, badge: String? = nil, subtitle: String? = nil) -> FlowNode<PreviewNodeData> {
+            FlowNode(id: id, position: CGPoint(x: x, y: y), size: s, data: PreviewNodeData(title: title, category: category, icon: icon, badge: badge, subtitle: subtitle), handles: handles)
+        }
+
+        let store = FlowStore<PreviewNodeData>(
             nodes: [
-                FlowNode(id: "start", position: CGPoint(x: 30, y: 150), size: CGSize(width: 120, height: 50), data: "Start", handles: h),
-                FlowNode(id: "process", position: CGPoint(x: 220, y: 80), size: CGSize(width: 120, height: 50), data: "Process", handles: h),
-                FlowNode(id: "condition", position: CGPoint(x: 220, y: 220), size: CGSize(width: 120, height: 50), data: "Condition", handles: h),
-                FlowNode(id: "approve", position: CGPoint(x: 420, y: 80), size: CGSize(width: 120, height: 50), data: "Approve", handles: h),
-                FlowNode(id: "reject", position: CGPoint(x: 420, y: 220), size: CGSize(width: 120, height: 50), data: "Reject", handles: h),
-                FlowNode(id: "end", position: CGPoint(x: 610, y: 150), size: CGSize(width: 120, height: 50), data: "End", handles: h),
+                // Entry
+                n("webhook", x: 30,   y: 200, title: "Webhook",   category: "Trigger",   icon: "bolt.fill",             handles: hOut),
+                n("auth",    x: 240,  y: 200, title: "Auth",      category: "Security",  icon: "lock.fill",             subtitle: "OAuth 2.0"),
+                n("router",  x: 450,  y: 200, title: "Router",    category: "Logic",     icon: "arrow.triangle.branch"),
+                // Top branch
+                n("parse",     x: 660,  y: 60,  title: "Parse",     category: "Data",      icon: "doc.text.fill",       subtitle: "JSON"),
+                n("transform", x: 870,  y: 60,  title: "Transform", category: "Transform", icon: "wand.and.stars",      subtitle: "Map fields"),
+                n("dbwrite",   x: 1080, y: 60,  title: "DB Write",  category: "Storage",   icon: "internaldrive.fill",  subtitle: "PostgreSQL"),
+                // Middle branch
+                n("validate", x: 660,  y: 200, title: "Validate",  category: "Logic",     icon: "checkmark.shield.fill"),
+                n("enrich",   x: 870,  y: 200, title: "Enrich",    category: "Data",      icon: "plus.magnifyingglass", subtitle: "Metadata"),
+                n("apicall",  x: 1080, y: 200, title: "API Call",  category: "Network",   icon: "network",              badge: "POST", subtitle: "api.example.com"),
+                // Bottom branch
+                n("cache",  x: 660,  y: 340, title: "Cache",  category: "Storage", icon: "tray.full.fill",         subtitle: "Redis"),
+                n("queue",  x: 870,  y: 340, title: "Queue",  category: "Queue",   icon: "list.bullet",            subtitle: "3 pending"),
+                n("retry",  x: 1080, y: 340, title: "Retry",  category: "Logic",   icon: "arrow.counterclockwise"),
+                // Exit
+                n("merge",  x: 1290, y: 200, title: "Merge",  category: "Logic",     icon: "arrow.triangle.merge"),
+                n("format", x: 1500, y: 200, title: "Format", category: "Transform", icon: "text.alignleft",       subtitle: "Template"),
+                n("notify", x: 1710, y: 200, title: "Notify", category: "Output",    icon: "bell.fill",            handles: hIn, badge: "3"),
             ],
             edges: [
-                FlowEdge(id: "e1", sourceNodeID: "start", sourceHandleID: "source", targetNodeID: "process", targetHandleID: "target"),
-                FlowEdge(id: "e2", sourceNodeID: "start", sourceHandleID: "source", targetNodeID: "condition", targetHandleID: "target"),
-                FlowEdge(id: "e3", sourceNodeID: "process", sourceHandleID: "source", targetNodeID: "approve", targetHandleID: "target"),
-                FlowEdge(id: "e4", sourceNodeID: "condition", sourceHandleID: "source", targetNodeID: "reject", targetHandleID: "target", label: "No"),
-                FlowEdge(id: "e5", sourceNodeID: "approve", sourceHandleID: "source", targetNodeID: "end", targetHandleID: "target"),
-                FlowEdge(id: "e6", sourceNodeID: "reject", sourceHandleID: "source", targetNodeID: "end", targetHandleID: "target"),
-            ]
+                // Entry
+                FlowEdge(id: "e01", sourceNodeID: "webhook", sourceHandleID: "out", targetNodeID: "auth",     targetHandleID: "in"),
+                FlowEdge(id: "e02", sourceNodeID: "auth",    sourceHandleID: "out", targetNodeID: "router",   targetHandleID: "in"),
+                // Fan-out from router
+                FlowEdge(id: "e03", sourceNodeID: "router",  sourceHandleID: "out", targetNodeID: "parse",    targetHandleID: "in", label: "JSON"),
+                FlowEdge(id: "e04", sourceNodeID: "router",  sourceHandleID: "out", targetNodeID: "validate", targetHandleID: "in"),
+                FlowEdge(id: "e05", sourceNodeID: "router",  sourceHandleID: "out", targetNodeID: "cache",    targetHandleID: "in", label: "Static"),
+                // Top branch
+                FlowEdge(id: "e06", sourceNodeID: "parse",     sourceHandleID: "out", targetNodeID: "transform", targetHandleID: "in"),
+                FlowEdge(id: "e07", sourceNodeID: "transform", sourceHandleID: "out", targetNodeID: "dbwrite",   targetHandleID: "in"),
+                FlowEdge(id: "e08", sourceNodeID: "dbwrite",   sourceHandleID: "out", targetNodeID: "merge",     targetHandleID: "in"),
+                // Middle branch
+                FlowEdge(id: "e09", sourceNodeID: "validate", sourceHandleID: "out", targetNodeID: "enrich",  targetHandleID: "in"),
+                FlowEdge(id: "e10", sourceNodeID: "enrich",   sourceHandleID: "out", targetNodeID: "apicall", targetHandleID: "in"),
+                FlowEdge(id: "e11", sourceNodeID: "apicall",  sourceHandleID: "out", targetNodeID: "merge",   targetHandleID: "in"),
+                // Bottom branch
+                FlowEdge(id: "e12", sourceNodeID: "cache", sourceHandleID: "out", targetNodeID: "queue", targetHandleID: "in"),
+                FlowEdge(id: "e13", sourceNodeID: "queue", sourceHandleID: "out", targetNodeID: "retry", targetHandleID: "in"),
+                FlowEdge(id: "e14", sourceNodeID: "retry", sourceHandleID: "out", targetNodeID: "merge", targetHandleID: "in"),
+                // Exit
+                FlowEdge(id: "e15", sourceNodeID: "merge",  sourceHandleID: "out", targetNodeID: "format", targetHandleID: "in"),
+                FlowEdge(id: "e16", sourceNodeID: "format", sourceHandleID: "out", targetNodeID: "notify", targetHandleID: "in"),
+            ],
+            configuration: FlowConfiguration(
+                backgroundStyle: BackgroundStyle(pattern: .dot)
+            )
         )
         store.onConnect = { [weak store] proposal in
             guard let store else { return }
@@ -541,6 +894,15 @@ private enum CanvasDragMode {
         }
         return store
     }()
-    FlowCanvas<String, DefaultNodeContent<String>>(store: store)
-        .frame(minWidth: 800, minHeight: 600)
+    GeometryReader { geometry in
+        ZStack(alignment: .bottomTrailing) {
+            FlowCanvas<PreviewNodeData, PreviewNodeContent>(store: store)
+            MinimapView(store: store, canvasSize: geometry.size)
+                .padding(12)
+        }
+        .onAppear {
+            store.fitToContent(canvasSize: geometry.size)
+        }
+    }
+    .frame(minWidth: 800, minHeight: 600)
 }

@@ -50,6 +50,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     // MARK: - Node Operations
 
     public func addNode(_ node: FlowNode<Data>) {
+        guard nodeLookup[node.id] == nil else { return }
         nodes.append(node)
         nodeLookup[node.id] = node
         onNodesChange?([.add(node)])
@@ -153,19 +154,27 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     public func clearSelection() {
+        var nodeChanges: [NodeChange<Data>] = []
+        var edgeChanges: [EdgeChange] = []
+
         for nodeID in selectedNodeIDs {
             if let index = nodes.firstIndex(where: { $0.id == nodeID }) {
                 nodes[index].isSelected = false
                 nodeLookup[nodeID] = nodes[index]
+                nodeChanges.append(.select(nodeID: nodeID, isSelected: false))
             }
         }
         for edgeID in selectedEdgeIDs {
             if let index = edges.firstIndex(where: { $0.id == edgeID }) {
                 edges[index].isSelected = false
+                edgeChanges.append(.select(edgeID: edgeID, isSelected: false))
             }
         }
         selectedNodeIDs.removeAll()
         selectedEdgeIDs.removeAll()
+
+        if !nodeChanges.isEmpty { onNodesChange?(nodeChanges) }
+        if !edgeChanges.isEmpty { onEdgesChange?(edgeChanges) }
     }
 
     public func selectNodesInRect(_ rect: SelectionRect) {
@@ -173,16 +182,24 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
         let selectionFrame = rect.rect
         var newSelectedNodeIDs = Set<String>()
+        var changes: [NodeChange<Data>] = []
+
         for index in nodes.indices {
             let nodeFrame = nodes[index].frame
             let isInSelection = selectionFrame.intersects(nodeFrame)
+            let wasSelected = nodes[index].isSelected
             nodes[index].isSelected = isInSelection
             nodeLookup[nodes[index].id] = nodes[index]
             if isInSelection {
                 newSelectedNodeIDs.insert(nodes[index].id)
             }
+            if wasSelected != isInSelection {
+                changes.append(.select(nodeID: nodes[index].id, isSelected: isInSelection))
+            }
         }
         selectedNodeIDs = newSelectedNodeIDs
+
+        if !changes.isEmpty { onNodesChange?(changes) }
     }
 
     // MARK: - Viewport
@@ -213,10 +230,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
         let contentHeight = bounds.height + padding * 2
         guard contentWidth > 0, contentHeight > 0 else { return }
 
-        viewport.zoom = min(1.0, min(
-            canvasSize.width / contentWidth,
-            canvasSize.height / contentHeight
-        ))
+        let fitted = min(canvasSize.width / contentWidth, canvasSize.height / contentHeight)
+        viewport.zoom = max(configuration.minZoom, min(configuration.maxZoom, min(1.0, fitted)))
         viewport.offset = CGPoint(
             x: -bounds.minX * viewport.zoom + (canvasSize.width - bounds.width * viewport.zoom) / 2,
             y: -bounds.minY * viewport.zoom + (canvasSize.height - bounds.height * viewport.zoom) / 2
@@ -313,7 +328,10 @@ public final class FlowStore<Data: Sendable & Hashable> {
         var bestDistance: CGFloat = threshold
         var bestResult: HandleHitResult?
 
-        for node in nodes.reversed() {
+        // Iterate front-to-back (highest zIndex first) to match visual order
+        let sortedNodes = nodes.sorted { $0.zIndex > $1.zIndex }
+
+        for node in sortedNodes {
             for handle in node.handles {
                 let point = handlePoint(for: handle.position, in: node)
                 let distance = hypot(canvasPoint.x - point.x, canvasPoint.y - point.y)
@@ -333,7 +351,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     func hitTestNode(at canvasPoint: CGPoint) -> String? {
-        for node in nodes.reversed() {
+        // Iterate front-to-back (highest zIndex first) to match visual order
+        for node in nodes.sorted(by: { $0.zIndex > $1.zIndex }) {
             if node.frame.contains(canvasPoint) {
                 return node.id
             }
@@ -347,11 +366,25 @@ public final class FlowStore<Data: Sendable & Hashable> {
             let targetInfo = handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
             guard let source = sourceInfo, let target = targetInfo else { continue }
 
-            if GeometryHelpers.pointOnLine(from: source.point, to: target.point, point: canvasPoint, tolerance: threshold) {
+            let calculator = Self.pathCalculator(for: edge.pathType)
+            let edgePath = calculator.path(
+                from: source.point, sourcePosition: source.position,
+                to: target.point, targetPosition: target.position
+            )
+            if GeometryHelpers.pointOnPath(edgePath.path, point: canvasPoint, tolerance: threshold) {
                 return edge.id
             }
         }
         return nil
+    }
+
+    private static func pathCalculator(for type: EdgePathType) -> any EdgePathCalculating {
+        switch type {
+        case .bezier: BezierEdgePath()
+        case .straight: StraightEdgePath()
+        case .smoothStep: SmoothStepEdgePath()
+        case .simpleBezier: SimpleBezierEdgePath()
+        }
     }
 
     // MARK: - Query
@@ -387,7 +420,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     private func rebuildNodeLookup() {
-        nodeLookup = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
+        nodeLookup = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
     }
 
     private func rebuildConnectionLookup() {

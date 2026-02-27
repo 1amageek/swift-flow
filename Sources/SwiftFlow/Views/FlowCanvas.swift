@@ -30,6 +30,7 @@ public struct FlowCanvas<
     @ViewBuilder
     private func canvasBody(in size: CGSize) -> some View {
         let canvasView = Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { context, canvasSize in
+            drawBackground(context: &context, canvasSize: canvasSize)
             drawEdges(context: &context, canvasSize: canvasSize)
             drawNodes(context: &context, canvasSize: canvasSize)
             drawSelectionRect(context: &context)
@@ -84,6 +85,82 @@ public struct FlowCanvas<
         #endif
     }
 
+    // MARK: - Drawing: Background
+
+    private func drawBackground(context: inout GraphicsContext, canvasSize: CGSize) {
+        let style = store.configuration.backgroundStyle
+        guard style.pattern != .none else { return }
+
+        let viewport = store.viewport
+        let spacing = style.spacing * viewport.zoom
+
+        // Avoid drawing when spacing is too small to be visible
+        guard spacing > 2 else { return }
+
+        // Calculate visible canvas range and snap to grid lines
+        let topLeft = viewport.screenToCanvas(.zero)
+        let bottomRight = viewport.screenToCanvas(CGPoint(x: canvasSize.width, y: canvasSize.height))
+
+        let startX = (topLeft.x / style.spacing).rounded(.down) * style.spacing
+        let startY = (topLeft.y / style.spacing).rounded(.down) * style.spacing
+        let endX = (bottomRight.x / style.spacing).rounded(.up) * style.spacing
+        let endY = (bottomRight.y / style.spacing).rounded(.up) * style.spacing
+
+        switch style.pattern {
+        case .none:
+            break
+
+        case .grid:
+            var gridPath = Path()
+
+            // Vertical lines
+            var x = startX
+            while x <= endX {
+                let screenX = x * viewport.zoom + viewport.offset.x
+                gridPath.move(to: CGPoint(x: screenX, y: 0))
+                gridPath.addLine(to: CGPoint(x: screenX, y: canvasSize.height))
+                x += style.spacing
+            }
+
+            // Horizontal lines
+            var y = startY
+            while y <= endY {
+                let screenY = y * viewport.zoom + viewport.offset.y
+                gridPath.move(to: CGPoint(x: 0, y: screenY))
+                gridPath.addLine(to: CGPoint(x: canvasSize.width, y: screenY))
+                y += style.spacing
+            }
+
+            context.stroke(
+                gridPath,
+                with: .color(style.color),
+                style: StrokeStyle(lineWidth: style.lineWidth)
+            )
+
+        case .dot:
+            var dotPath = Path()
+
+            var x = startX
+            while x <= endX {
+                var y = startY
+                while y <= endY {
+                    let screenX = x * viewport.zoom + viewport.offset.x
+                    let screenY = y * viewport.zoom + viewport.offset.y
+                    dotPath.addEllipse(in: CGRect(
+                        x: screenX - style.dotRadius,
+                        y: screenY - style.dotRadius,
+                        width: style.dotRadius * 2,
+                        height: style.dotRadius * 2
+                    ))
+                    y += style.spacing
+                }
+                x += style.spacing
+            }
+
+            context.fill(dotPath, with: .color(style.color))
+        }
+    }
+
     // MARK: - Drawing: Edges
 
     private func drawEdges(context: inout GraphicsContext, canvasSize: CGSize) {
@@ -92,6 +169,7 @@ public struct FlowCanvas<
 
         var normalPath = Path()
         var selectedPath = Path()
+        var animatedPath = Path()
         var labelsToDraw: [(String, CGPoint)] = []
 
         for edge in store.edges {
@@ -120,6 +198,8 @@ public struct FlowCanvas<
 
             if edge.isSelected {
                 selectedPath.addPath(transformed)
+            } else if edge.isAnimated {
+                animatedPath.addPath(transformed)
             } else {
                 normalPath.addPath(transformed)
             }
@@ -134,6 +214,10 @@ public struct FlowCanvas<
         if !normalPath.isEmpty {
             let strokeStyle = StrokeStyle(lineWidth: style.lineWidth, dash: style.dashPattern)
             context.stroke(normalPath, with: .color(style.strokeColor), style: strokeStyle)
+        }
+        if !animatedPath.isEmpty {
+            let strokeStyle = StrokeStyle(lineWidth: style.lineWidth, dash: style.animatedDashPattern)
+            context.stroke(animatedPath, with: .color(style.strokeColor), style: strokeStyle)
         }
         if !selectedPath.isEmpty {
             let strokeStyle = StrokeStyle(lineWidth: style.selectedLineWidth)

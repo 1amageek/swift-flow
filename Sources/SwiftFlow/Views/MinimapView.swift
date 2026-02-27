@@ -37,8 +37,8 @@ public struct MinimapView<Data: Sendable & Hashable>: View {
                         height: max(node.size.height * scale, 2)
                     )
                     .position(
-                        x: (node.position.x - expandedBounds.minX) * scale,
-                        y: (node.position.y - expandedBounds.minY) * scale
+                        x: (node.position.x + node.size.width / 2 - expandedBounds.minX) * scale,
+                        y: (node.position.y + node.size.height / 2 - expandedBounds.minY) * scale
                     )
             }
 

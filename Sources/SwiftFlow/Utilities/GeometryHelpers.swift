@@ -1,4 +1,4 @@
-import Foundation
+import SwiftUI
 
 enum GeometryHelpers {
 
@@ -26,6 +26,12 @@ enum GeometryHelpers {
         )
 
         return point.distance(to: projection) <= tolerance
+    }
+
+    /// Hit test a point against a Path by stroking it with the given tolerance as line width.
+    static func pointOnPath(_ path: Path, point: CGPoint, tolerance: CGFloat = 5) -> Bool {
+        let strokedPath = path.strokedPath(StrokeStyle(lineWidth: tolerance * 2))
+        return strokedPath.contains(point)
     }
 
     static func boundingBox(of nodes: [CGRect]) -> CGRect {

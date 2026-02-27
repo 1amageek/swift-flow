@@ -4,6 +4,7 @@ public struct FlowConfiguration: Sendable {
 
     public var defaultEdgePathType: EdgePathType
     public var edgeStyle: EdgeStyle
+    public var backgroundStyle: BackgroundStyle
     public var snapToGrid: Bool
     public var gridSize: CGFloat
     public var minZoom: CGFloat
@@ -17,6 +18,7 @@ public struct FlowConfiguration: Sendable {
     public init(
         defaultEdgePathType: EdgePathType = .bezier,
         edgeStyle: EdgeStyle = EdgeStyle(),
+        backgroundStyle: BackgroundStyle = BackgroundStyle(),
         snapToGrid: Bool = false,
         gridSize: CGFloat = 20,
         minZoom: CGFloat = 0.1,
@@ -29,6 +31,7 @@ public struct FlowConfiguration: Sendable {
     ) {
         self.defaultEdgePathType = defaultEdgePathType
         self.edgeStyle = edgeStyle
+        self.backgroundStyle = backgroundStyle
         self.snapToGrid = snapToGrid
         self.gridSize = gridSize
         self.minZoom = minZoom
@@ -41,7 +44,7 @@ public struct FlowConfiguration: Sendable {
     }
 
     func snapped(_ point: CGPoint) -> CGPoint {
-        guard snapToGrid else { return point }
+        guard snapToGrid, gridSize > 0 else { return point }
         return CGPoint(
             x: (point.x / gridSize).rounded() * gridSize,
             y: (point.y / gridSize).rounded() * gridSize

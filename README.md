@@ -35,7 +35,7 @@ struct ContentView: View {
     )
 
     var body: some View {
-        FlowCanvas<String, DefaultNodeContent<String>>(store: store)
+        FlowCanvas(store: store)
     }
 }
 ```
@@ -127,65 +127,58 @@ FlowEdge(
 
 ### FlowCanvas
 
-The main view. Generic over `Data` and a `NodeContent` conforming view.
+The main view. It accepts `@ViewBuilder` closures for customizing node and edge appearance.
 
 ```swift
-FlowCanvas<String, DefaultNodeContent<String>>(store: store)
-```
+// Default appearance
+FlowCanvas(store: store)
 
-Or with a custom node view:
+// Custom nodes
+FlowCanvas(store: store) { node in
+    MyNodeView(node: node)
+}
 
-```swift
-FlowCanvas<MyData, MyNodeView>(store: store)
+// Custom nodes + custom edges
+FlowCanvas(store: store) { node in
+    MyNodeView(node: node)
+} edgeContent: { edge, geometry in
+    geometry.path.stroke(edge.isSelected ? .blue : .gray, lineWidth: 2)
+}
+
+// Default nodes + custom edges
+FlowCanvas(store: store, edgeContent: { edge, geometry in
+    geometry.path.stroke(.red, lineWidth: 2)
+})
 ```
 
 ## Custom Node Views
 
-Implement the `NodeContent` protocol to define your own node appearance:
+Provide a `@ViewBuilder` closure to `FlowCanvas` that returns any SwiftUI view for each node:
 
 ```swift
-struct StatusNodeContent: NodeContent {
-    typealias NodeData = TaskData
-
-    let node: FlowNode<TaskData>
-
-    init(node: FlowNode<TaskData>) {
-        self.node = node
+FlowCanvas(store: store) { node in
+    VStack(spacing: 4) {
+        Text(node.data.title)
+            .font(.caption.bold())
+        Text(node.data.status)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
     }
-
-    var body: some View {
-        VStack(spacing: 4) {
-            Text(node.data.title)
-                .font(.caption.bold())
-            Text(node.data.status)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(8)
-        .frame(width: node.size.width, height: node.size.height)
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(node.isSelected ? .blue : .gray.opacity(0.3))
-        }
-        .overlay {
-            ForEach(node.handles, id: \.id) { handle in
-                FlowHandle(handle.id, type: handle.type, position: handle.position)
-                    .frame(
-                        maxWidth: .infinity,
-                        maxHeight: .infinity,
-                        alignment: handleAlignment(handle.position)
-                    )
-            }
-        }
+    .padding(8)
+    .frame(width: node.size.width, height: node.size.height)
+    .background(.background, in: RoundedRectangle(cornerRadius: 8))
+    .overlay {
+        RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(node.isSelected ? .blue : .gray.opacity(0.3))
     }
-
-    private func handleAlignment(_ position: HandlePosition) -> Alignment {
-        switch position {
-        case .top: .top
-        case .bottom: .bottom
-        case .left: .leading
-        case .right: .trailing
+    .overlay {
+        ForEach(node.handles, id: \.id) { handle in
+            FlowHandle(handle.id, type: handle.type, position: handle.position)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: handleAlignment(handle.position)
+                )
         }
     }
 }
@@ -197,6 +190,57 @@ Key points for custom nodes:
 - Use `node.isSelected` to show selection state
 - Use `node.isHovered` to show hover state (mouse over on macOS, pointer hover on iOS)
 - Use `FlowHandle(id, type:, position:)` for each handle in `node.handles`
+
+You can also switch between different node views based on the data:
+
+```swift
+FlowCanvas(store: store) { node in
+    switch node.data {
+    case .trigger: TriggerNodeView(node: node)
+    case .logic:   LogicNodeView(node: node)
+    case .output:  OutputNodeView(node: node)
+    }
+}
+```
+
+## Custom Edge Views
+
+Provide an `edgeContent` closure to render each edge as a SwiftUI view. The closure receives a `FlowEdge` and an `EdgeGeometry` with pre-computed path and position data in local coordinates.
+
+```swift
+FlowCanvas(store: store) { node in
+    DefaultNodeContent(node: node)
+} edgeContent: { edge, geometry in
+    geometry.path.stroke(
+        edge.isSelected ? Color.blue : Color.gray,
+        style: StrokeStyle(lineWidth: 2, lineCap: .round)
+    )
+    if let label = edge.label {
+        Text(label)
+            .font(.caption2)
+            .position(geometry.labelPosition)
+    }
+}
+```
+
+### EdgeGeometry
+
+`EdgeGeometry` provides all the information needed to render an edge. All coordinates are in the view's local coordinate system (bounds origin mapped to (0, 0)).
+
+| Property | Type | Description |
+|---|---|---|
+| `path` | `Path` | Pre-computed edge path |
+| `sourcePoint` | `CGPoint` | Source handle position |
+| `targetPoint` | `CGPoint` | Target handle position |
+| `sourcePosition` | `HandlePosition` | Source handle direction |
+| `targetPosition` | `HandlePosition` | Target handle direction |
+| `labelPosition` | `CGPoint` | Suggested label placement |
+| `labelAngle` | `Angle` | Suggested label rotation |
+| `bounds` | `CGRect` | Canvas-space bounding rect |
+
+### Performance Note
+
+When no `edgeContent` closure is provided, edges are batch-drawn via `GraphicsContext` (3 stroke calls for normal, selected, and animated edges). When custom edge content is provided, each edge is rendered as a Canvas symbol. Connection drafts (in-progress connections) always use the efficient `GraphicsContext` path.
 
 ## Handling Connections
 
@@ -372,7 +416,8 @@ store.load(document)
 | Zoom | Pinch trackpad / scroll+magnify | Pinch gesture |
 | Connect | Drag from handle to handle | Drag from handle to handle |
 | Select node/edge | Click | Tap |
-| Multi-select | Shift + drag rectangle | Long press + drag |
+| Add to selection | Command + Click | Command + Tap |
+| Multi-select (rect) | Shift + drag rectangle | Long press + drag |
 | Hover | Mouse over node | Pointer hover |
 | Cursor feedback | Contextual (hand/crosshair/arrow) | N/A |
 
@@ -380,9 +425,11 @@ store.load(document)
 
 ```
 ┌─────────────────────────────────────────────┐
-│ FlowCanvas<Data, Content>                   │
+│ FlowCanvas<NodeData, NodeView>              │
 │  ├─ Canvas + GraphicsContext (edges)        │
 │  ├─ resolveSymbol (nodes as SwiftUI Views)  │
+│  ├─ @ViewBuilder nodeContent closure        │
+│  ├─ @ViewBuilder edgeContent closure (opt)  │
 │  └─ Gesture state machine                   │
 ├─────────────────────────────────────────────┤
 │ FlowStore<Data>  (@Observable, @MainActor)  │
@@ -393,7 +440,6 @@ store.load(document)
 │  └─ hit testing, connection workflow        │
 ├─────────────────────────────────────────────┤
 │ Protocols                                    │
-│  ├─ NodeContent (custom node views)         │
 │  ├─ EdgePathCalculating (custom routing)    │
 │  └─ ConnectionValidating (connection rules) │
 └─────────────────────────────────────────────┘

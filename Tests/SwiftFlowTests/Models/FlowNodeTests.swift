@@ -13,6 +13,7 @@ struct FlowNodeTests {
         #expect(node.size == CGSize(width: 150, height: 60))
         #expect(node.data == "Hello")
         #expect(node.isSelected == false)
+        #expect(node.isHovered == false)
         #expect(node.isDraggable == true)
         #expect(node.zIndex == 0)
     }
@@ -53,5 +54,21 @@ struct FlowNodeTests {
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(FlowNode<String>.self, from: data)
         #expect(decoded == node)
+    }
+
+    @Test("Codable excludes isHovered")
+    func codableExcludesHovered() throws {
+        var node = FlowNode(
+            id: "n1",
+            position: CGPoint(x: 0, y: 0),
+            data: "Test"
+        )
+        node.isHovered = true
+
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(node)
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(FlowNode<String>.self, from: data)
+        #expect(decoded.isHovered == false)
     }
 }

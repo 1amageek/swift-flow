@@ -2,7 +2,7 @@ import SwiftUI
 
 public struct FlowHandle: View {
 
-    /// Handle diameter used by DefaultNodeContent for layout.
+    /// Handle diameter used for node layout.
     static let diameter: CGFloat = 10
 
     let handleID: String

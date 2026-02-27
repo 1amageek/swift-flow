@@ -1,4 +1,3 @@
-import CoreFoundation
 import Foundation
 
 public struct FlowDocument<Data: Sendable & Hashable & Codable>: Codable, Sendable {

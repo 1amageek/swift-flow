@@ -3,7 +3,7 @@ import SwiftUI
 /// Default node view:
 /// - Clean card with title centered
 /// - Handles protruding on the node border
-public struct DefaultNodeContent<NodeData: Sendable & Hashable>: NodeContent {
+public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
 
     public let node: FlowNode<NodeData>
 

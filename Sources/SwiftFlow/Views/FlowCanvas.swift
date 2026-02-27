@@ -2,14 +2,55 @@ import SwiftUI
 
 public struct FlowCanvas<
     NodeData: Sendable & Hashable,
-    Content: NodeContent
->: View where Content.NodeData == NodeData {
+    NodeView: View
+>: View {
 
     @Bindable var store: FlowStore<NodeData>
     @Environment(\.colorScheme) private var colorScheme
 
-    public init(store: FlowStore<NodeData>) {
+    private let nodeContentBuilder: (FlowNode<NodeData>) -> NodeView
+    private let edgeContentBuilder: ((FlowEdge, EdgeGeometry) -> AnyView)?
+
+    // MARK: - Init: Default
+
+    public init(store: FlowStore<NodeData>) where NodeView == DefaultNodeContent<NodeData> {
         self.store = store
+        self.nodeContentBuilder = { node in DefaultNodeContent(node: node) }
+        self.edgeContentBuilder = nil
+    }
+
+    // MARK: - Init: Custom nodes
+
+    public init(
+        store: FlowStore<NodeData>,
+        @ViewBuilder nodeContent: @escaping (FlowNode<NodeData>) -> NodeView
+    ) {
+        self.store = store
+        self.nodeContentBuilder = nodeContent
+        self.edgeContentBuilder = nil
+    }
+
+    // MARK: - Init: Custom nodes + custom edges
+
+    public init<EdgeView: View>(
+        store: FlowStore<NodeData>,
+        @ViewBuilder nodeContent: @escaping (FlowNode<NodeData>) -> NodeView,
+        @ViewBuilder edgeContent: @escaping (FlowEdge, EdgeGeometry) -> EdgeView
+    ) {
+        self.store = store
+        self.nodeContentBuilder = nodeContent
+        self.edgeContentBuilder = { edge, geometry in AnyView(edgeContent(edge, geometry)) }
+    }
+
+    // MARK: - Init: Default nodes + custom edges
+
+    public init<EdgeView: View>(
+        store: FlowStore<NodeData>,
+        @ViewBuilder edgeContent: @escaping (FlowEdge, EdgeGeometry) -> EdgeView
+    ) where NodeView == DefaultNodeContent<NodeData> {
+        self.store = store
+        self.nodeContentBuilder = { node in DefaultNodeContent(node: node) }
+        self.edgeContentBuilder = { edge, geometry in AnyView(edgeContent(edge, geometry)) }
     }
 
     // MARK: - Drag State
@@ -34,21 +75,37 @@ public struct FlowCanvas<
     private func canvasBody(in size: CGSize) -> some View {
         let canvasView = Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { context, canvasSize in
             drawBackground(context: &context, canvasSize: canvasSize)
-            drawEdges(context: &context, canvasSize: canvasSize)
+            if edgeContentBuilder != nil {
+                drawEdgesViaSymbols(context: &context, canvasSize: canvasSize)
+            } else {
+                drawEdgesViaGraphicsContext(context: &context, canvasSize: canvasSize)
+            }
             drawNodes(context: &context, canvasSize: canvasSize)
             drawSelectionRect(context: &context)
             drawConnectionDraft(context: &context, canvasSize: canvasSize)
         } symbols: {
             ForEach(store.nodes) { node in
-                Content(node: node)
+                nodeContentBuilder(node)
                     .tag(node.id)
+            }
+            if let edgeContentBuilder {
+                ForEach(store.edges) { edge in
+                    edgeSymbolView(edge: edge, builder: edgeContentBuilder)
+                }
             }
         }
         .gesture(primaryDragGesture)
         .gesture(selectionGesture)
         .gesture(magnifyGesture)
+        .gesture(
+            SpatialTapGesture()
+                .modifiers(.command)
+                .onEnded { value in
+                    handleTap(at: value.location, isAdditive: true)
+                }
+        )
         .onTapGesture { location in
-            handleTap(at: location)
+            handleTap(at: location, isAdditive: false)
         }
         .onDisappear {
             #if os(macOS)
@@ -186,9 +243,9 @@ public struct FlowCanvas<
         }
     }
 
-    // MARK: - Drawing: Edges
+    // MARK: - Drawing: Edges (GraphicsContext batch)
 
-    private func drawEdges(context: inout GraphicsContext, canvasSize: CGSize) {
+    private func drawEdgesViaGraphicsContext(context: inout GraphicsContext, canvasSize: CGSize) {
         let style = store.configuration.edgeStyle
         let viewport = store.viewport
 
@@ -495,14 +552,30 @@ public struct FlowCanvas<
 
     // MARK: - Tap
 
-    private func handleTap(at location: CGPoint) {
+    private func handleTap(at location: CGPoint, isAdditive: Bool = false) {
         let canvasPoint = store.viewport.screenToCanvas(location)
 
         if let nodeID = store.hitTestNode(at: canvasPoint) {
-            store.selectNode(nodeID)
+            if isAdditive {
+                if store.selectedNodeIDs.contains(nodeID) {
+                    store.deselectNode(nodeID)
+                } else {
+                    store.selectNode(nodeID, exclusive: false)
+                }
+            } else {
+                store.selectNode(nodeID)
+            }
         } else if let edgeID = store.hitTestEdge(at: canvasPoint) {
-            store.selectEdge(edgeID)
-        } else {
+            if isAdditive {
+                if store.selectedEdgeIDs.contains(edgeID) {
+                    store.deselectEdge(edgeID)
+                } else {
+                    store.selectEdge(edgeID, exclusive: false)
+                }
+            } else {
+                store.selectEdge(edgeID)
+            }
+        } else if !isAdditive {
             store.clearSelection()
         }
     }
@@ -568,6 +641,70 @@ public struct FlowCanvas<
     }
     #endif
 
+    // MARK: - Drawing: Edges (symbol-based)
+
+    private func drawEdgesViaSymbols(context: inout GraphicsContext, canvasSize: CGSize) {
+        let viewport = store.viewport
+        let margin: CGFloat = 50
+
+        for edge in store.edges {
+            guard let geometry = computeEdgeGeometry(for: edge) else { continue }
+
+            let screenMin = viewport.canvasToScreen(geometry.bounds.origin)
+            let screenMax = viewport.canvasToScreen(
+                CGPoint(x: geometry.bounds.maxX, y: geometry.bounds.maxY)
+            )
+            let screenBounds = CGRect(
+                x: screenMin.x, y: screenMin.y,
+                width: screenMax.x - screenMin.x,
+                height: screenMax.y - screenMin.y
+            ).standardized
+
+            let visibleRect = CGRect(origin: .zero, size: canvasSize).insetBy(dx: -margin, dy: -margin)
+            guard visibleRect.intersects(screenBounds) else { continue }
+
+            if let resolved = context.resolveSymbol(id: EdgeSymbolID(edgeID: edge.id)) {
+                context.draw(resolved, in: screenBounds)
+            }
+        }
+    }
+
+    private func computeEdgeGeometry(for edge: FlowEdge) -> EdgeGeometry? {
+        guard let source = store.handleInfo(nodeID: edge.sourceNodeID, handleID: edge.sourceHandleID),
+              let target = store.handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
+        else { return nil }
+
+        let calculator = pathCalculator(for: edge.pathType)
+        let edgePath = calculator.path(
+            from: source.point, sourcePosition: source.position,
+            to: target.point, targetPosition: target.position
+        )
+
+        let rawBounds = edgePath.path.boundingRect.insetBy(dx: -20, dy: -20)
+        let offset = CGAffineTransform(translationX: -rawBounds.origin.x, y: -rawBounds.origin.y)
+        let translatedPath = Path(edgePath.path.cgPath.copy(using: [offset]) ?? edgePath.path.cgPath)
+
+        return EdgeGeometry(
+            path: translatedPath,
+            sourcePoint: CGPoint(x: source.point.x - rawBounds.origin.x, y: source.point.y - rawBounds.origin.y),
+            targetPoint: CGPoint(x: target.point.x - rawBounds.origin.x, y: target.point.y - rawBounds.origin.y),
+            sourcePosition: source.position,
+            targetPosition: target.position,
+            labelPosition: CGPoint(x: edgePath.labelPosition.x - rawBounds.origin.x, y: edgePath.labelPosition.y - rawBounds.origin.y),
+            labelAngle: edgePath.labelAngle,
+            bounds: rawBounds
+        )
+    }
+
+    @ViewBuilder
+    private func edgeSymbolView(edge: FlowEdge, builder: @escaping (FlowEdge, EdgeGeometry) -> AnyView) -> some View {
+        if let geometry = computeEdgeGeometry(for: edge) {
+            builder(edge, geometry)
+                .frame(width: geometry.bounds.width, height: geometry.bounds.height)
+                .tag(EdgeSymbolID(edgeID: edge.id))
+        }
+    }
+
     // MARK: - Helpers
 
     private func transformedPath(_ path: Path, viewport: Viewport) -> Path {
@@ -605,6 +742,10 @@ private enum CanvasDragMode {
     case connection(HandleHitResult)
 }
 
+private struct EdgeSymbolID: Hashable {
+    let edgeID: String
+}
+
 #if os(macOS)
 private enum DragCursorKind: Equatable {
     case closedHand
@@ -629,13 +770,12 @@ private struct PreviewNodeData: Sendable, Hashable {
     var subtitle: String?
 }
 
-private struct PreviewNodeContent: NodeContent {
-    typealias NodeData = PreviewNodeData
+private struct PreviewNode: View {
 
     let node: FlowNode<PreviewNodeData>
     static var handleInset: CGFloat { FlowHandle.diameter / 2 }
 
-    init(node: FlowNode<PreviewNodeData>) {
+    init(_ node: FlowNode<PreviewNodeData>) {
         self.node = node
     }
 
@@ -906,7 +1046,9 @@ private struct PreviewNodeContent: NodeContent {
     }()
     GeometryReader { geometry in
         ZStack(alignment: .bottomTrailing) {
-            FlowCanvas<PreviewNodeData, PreviewNodeContent>(store: store)
+            FlowCanvas(store: store) { node in
+                PreviewNode(node)
+            }
             MinimapView(store: store, canvasSize: geometry.size)
                 .padding(12)
         }

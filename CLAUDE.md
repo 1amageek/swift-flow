@@ -6,7 +6,7 @@ Canvas-based flow diagram library for SwiftUI (iOS 26+ / macOS 26+).
 
 - **Rendering**: Single `Canvas` + `GraphicsContext` — edges are batch-drawn via `context.stroke()`, nodes via `resolveSymbol()`
 - **State**: `FlowStore<Data>` is `@Observable` + `@MainActor`, single source of truth
-- **Extensibility**: `NodeContent` protocol for custom node views, `EdgePathCalculating` for edge routing
+- **Extensibility**: `@ViewBuilder` closures for custom node/edge views, `EdgePathCalculating` for edge routing
 
 ## Key Conventions
 
@@ -23,7 +23,7 @@ Sources/SwiftFlow/
 ├── Changes/       # NodeChange, EdgeChange enums
 ├── EdgePaths/     # BezierEdgePath, StraightEdgePath, SmoothStepEdgePath, SimpleBezierEdgePath
 ├── Models/        # FlowNode, FlowEdge, FlowDocument, HandleDeclaration, Viewport, etc.
-├── Protocols/     # NodeContent, EdgePathCalculating, ConnectionValidating
+├── Protocols/     # EdgePathCalculating, ConnectionValidating
 ├── Store/         # FlowStore, FlowConfiguration
 ├── Styles/        # EdgeStyle
 ├── Utilities/     # CGPointExtensions, GeometryHelpers
@@ -34,7 +34,7 @@ Sources/SwiftFlow/
 
 ```bash
 swift build                # macOS build
-swift test --timeout 60    # run tests with timeout
+swift test                 # run tests
 
 # iOS build verification
 xcodebuild -scheme SwiftFlow -destination 'generic/platform=iOS Simulator' build

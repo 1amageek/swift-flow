@@ -104,6 +104,123 @@ struct FlowStoreTests {
         #expect(store.edges[0].isSelected == false)
     }
 
+    // MARK: - Hover
+
+    @Test("Set hovered node updates isHovered and hoveredNodeID")
+    func setHoveredNode() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+
+        store.setHoveredNode("n1")
+        #expect(store.hoveredNodeID == "n1")
+        #expect(store.nodes[0].isHovered == true)
+        #expect(store.nodeLookup["n1"]?.isHovered == true)
+        #expect(store.nodes[1].isHovered == false)
+    }
+
+    @Test("Set hovered node clears previous hover")
+    func setHoveredNodeClearsPrevious() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+
+        store.setHoveredNode("n1")
+        store.setHoveredNode("n2")
+        #expect(store.hoveredNodeID == "n2")
+        #expect(store.nodes[0].isHovered == false)
+        #expect(store.nodes[1].isHovered == true)
+        #expect(store.nodeLookup["n1"]?.isHovered == false)
+        #expect(store.nodeLookup["n2"]?.isHovered == true)
+    }
+
+    @Test("Set hovered node to nil clears hover")
+    func setHoveredNodeNil() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        store.setHoveredNode("n1")
+        store.setHoveredNode(nil)
+        #expect(store.hoveredNodeID == nil)
+        #expect(store.nodes[0].isHovered == false)
+    }
+
+    @Test("Set hovered node with same ID is no-op")
+    func setHoveredNodeSameID() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        store.setHoveredNode("n1")
+        store.setHoveredNode("n1")
+        #expect(store.hoveredNodeID == "n1")
+        #expect(store.nodes[0].isHovered == true)
+    }
+
+    @Test("Remove hovered node clears hoveredNodeID")
+    func removeHoveredNode() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.setHoveredNode("n1")
+        #expect(store.hoveredNodeID == "n1")
+
+        store.removeNode("n1")
+        #expect(store.hoveredNodeID == nil)
+    }
+
+    @Test("Set hovered node with non-existent ID")
+    func setHoveredNodeNonExistent() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        store.setHoveredNode("nonexistent")
+        #expect(store.hoveredNodeID == "nonexistent")
+        #expect(store.nodes[0].isHovered == false)
+    }
+
+    @Test("Hover and selection are independent")
+    func hoverAndSelectionIndependent() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        store.setHoveredNode("n1")
+        store.selectNode("n1")
+        #expect(store.nodes[0].isHovered == true)
+        #expect(store.nodes[0].isSelected == true)
+
+        store.setHoveredNode(nil)
+        #expect(store.nodes[0].isHovered == false)
+        #expect(store.nodes[0].isSelected == true)
+
+        store.setHoveredNode("n1")
+        store.clearSelection()
+        #expect(store.nodes[0].isHovered == true)
+        #expect(store.nodes[0].isSelected == false)
+    }
+
+    @Test("Export resets isHovered")
+    func exportResetsHovered() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.setHoveredNode("n1")
+
+        let doc = store.export()
+        #expect(doc.nodes.allSatisfy { !$0.isHovered })
+    }
+
+    @Test("Load resets hoveredNodeID")
+    func loadResetsHovered() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.setHoveredNode("n1")
+
+        let doc = store.export()
+        store.load(doc)
+        #expect(store.hoveredNodeID == nil)
+        #expect(store.nodes.allSatisfy { !$0.isHovered })
+    }
+
+    // MARK: - Viewport
+
     @Test("Viewport pan")
     func viewportPan() {
         let store = FlowStore<String>()
@@ -550,6 +667,61 @@ struct FlowStoreTests {
             ]
         )
         #expect(node.handles.count == 3)
+    }
+
+    // MARK: - Command+Click Toggle Selection
+
+    @Test("Additive select toggles node into selection")
+    func additiveSelectNode() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 100, y: 0), data: "B"))
+
+        store.selectNode("n1")
+        #expect(store.selectedNodeIDs == Set(["n1"]))
+
+        // Additive: add n2 without clearing n1
+        store.selectNode("n2", exclusive: false)
+        #expect(store.selectedNodeIDs == Set(["n1", "n2"]))
+
+        // Toggle: deselect n1
+        store.deselectNode("n1")
+        #expect(store.selectedNodeIDs == Set(["n2"]))
+        #expect(store.nodes.first(where: { $0.id == "n1" })?.isSelected == false)
+        #expect(store.nodes.first(where: { $0.id == "n2" })?.isSelected == true)
+    }
+
+    @Test("Additive select toggles edge into selection")
+    func additiveSelectEdge() {
+        let store = FlowStore<String>()
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
+        store.addEdge(FlowEdge(id: "e2", sourceNodeID: "n2", targetNodeID: "n3"))
+
+        store.selectEdge("e1")
+        #expect(store.selectedEdgeIDs == Set(["e1"]))
+
+        // Additive: add e2 without clearing e1
+        store.selectEdge("e2", exclusive: false)
+        #expect(store.selectedEdgeIDs == Set(["e1", "e2"]))
+
+        // Toggle: deselect e1
+        store.deselectEdge("e1")
+        #expect(store.selectedEdgeIDs == Set(["e2"]))
+    }
+
+    @Test("Additive select with multiSelection disabled forces exclusive")
+    func additiveSelectMultiSelectionDisabled() {
+        var config = FlowConfiguration()
+        config.multiSelectionEnabled = false
+        let store = FlowStore<String>(configuration: config)
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 100, y: 0), data: "B"))
+
+        store.selectNode("n1")
+        // Even with exclusive: false, multiSelection disabled forces exclusive
+        store.selectNode("n2", exclusive: false)
+        #expect(store.selectedNodeIDs.count == 1)
+        #expect(store.selectedNodeIDs.contains("n2"))
     }
 
     // MARK: - EdgeStyle

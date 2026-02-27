@@ -68,6 +68,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
         rebuildSortedNodes()
 
         selectedNodeIDs.remove(nodeID)
+        if hoveredNodeID == nodeID {
+            hoveredNodeID = nil
+        }
 
         let removedEdges = edges.filter { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
         edges.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }

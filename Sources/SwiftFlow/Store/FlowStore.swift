@@ -28,6 +28,11 @@ public final class FlowStore<Data: Sendable & Hashable> {
     var connectionDraft: ConnectionDraft?
     var selectionRect: SelectionRect?
 
+    // MARK: - Undo
+
+    public var undoManager: UndoManager?
+    private var isUndoRegistrationDisabled = false
+
     // MARK: - Callbacks
 
     public var onNodesChange: (([NodeChange<Data>]) -> Void)?
@@ -60,9 +65,16 @@ public final class FlowStore<Data: Sendable & Hashable> {
         nodeLookup[node.id] = node
         rebuildSortedNodes()
         onNodesChange?([.add(node)])
+        let captured = node
+        registerUndo(actionName: "Add") { store in
+            store.removeNode(captured.id)
+        }
     }
 
     public func removeNode(_ nodeID: String) {
+        let capturedNode = nodeLookup[nodeID]
+        let cascadedEdges = edges.filter { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
+
         nodes.removeAll { $0.id == nodeID }
         nodeLookup.removeValue(forKey: nodeID)
         rebuildSortedNodes()
@@ -72,17 +84,30 @@ public final class FlowStore<Data: Sendable & Hashable> {
             hoveredNodeID = nil
         }
 
-        let removedEdges = edges.filter { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
         edges.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
         rebuildConnectionLookup()
 
-        for edge in removedEdges {
+        for edge in cascadedEdges {
             selectedEdgeIDs.remove(edge.id)
         }
 
         onNodesChange?([.remove(nodeID: nodeID)])
-        if !removedEdges.isEmpty {
-            onEdgesChange?(removedEdges.map { .remove(edgeID: $0.id) })
+        if !cascadedEdges.isEmpty {
+            onEdgesChange?(cascadedEdges.map { .remove(edgeID: $0.id) })
+        }
+
+        if let capturedNode {
+            registerUndo(actionName: "Remove") { store in
+                store.withoutUndoRegistration {
+                    store.addNode(capturedNode)
+                    for edge in cascadedEdges {
+                        store.addEdge(edge)
+                    }
+                }
+                store.registerUndo(actionName: "Remove") { store in
+                    store.removeNode(nodeID)
+                }
+            }
         }
     }
 
@@ -101,6 +126,88 @@ public final class FlowStore<Data: Sendable & Hashable> {
         onNodesChange?([.dimensions(nodeID: nodeID, size: size)])
     }
 
+    // MARK: - Move Completion (Undo)
+
+    public func completeMoveNodes(from startPositions: [String: CGPoint]) {
+        var endPositions: [String: CGPoint] = [:]
+        for (nodeID, _) in startPositions {
+            if let node = nodeLookup[nodeID] {
+                endPositions[nodeID] = node.position
+            }
+        }
+        let changed = startPositions.contains { id, pos in endPositions[id] != pos }
+        guard changed else { return }
+        registerMoveUndo(from: startPositions, to: endPositions)
+    }
+
+    private func registerMoveUndo(from: [String: CGPoint], to: [String: CGPoint]) {
+        registerUndo(actionName: "Move") { store in
+            for (nodeID, pos) in from {
+                store.moveNode(nodeID, to: pos)
+            }
+            store.registerMoveUndo(from: to, to: from)
+        }
+    }
+
+    // MARK: - Delete Selection
+
+    public func deleteSelection() {
+        let selectedNodes = nodes.filter { selectedNodeIDs.contains($0.id) }
+        let nodeIDsToRemove = Set(selectedNodes.map(\.id))
+
+        var allEdgeIDsToRemove = selectedEdgeIDs
+        for node in selectedNodes {
+            for edge in edgesForNode(node.id) {
+                allEdgeIDsToRemove.insert(edge.id)
+            }
+        }
+        let allEdgesToRemove = edges.filter { allEdgeIDsToRemove.contains($0.id) }
+
+        guard !selectedNodes.isEmpty || !allEdgesToRemove.isEmpty else { return }
+
+        let savedSelectedNodeIDs = selectedNodeIDs
+        let savedSelectedEdgeIDs = selectedEdgeIDs
+
+        withoutUndoRegistration {
+            let standaloneEdgeIDs = selectedEdgeIDs.filter { edgeID in
+                guard let edge = allEdgesToRemove.first(where: { $0.id == edgeID }) else { return false }
+                return !nodeIDsToRemove.contains(edge.sourceNodeID) && !nodeIDsToRemove.contains(edge.targetNodeID)
+            }
+            for edgeID in standaloneEdgeIDs {
+                removeEdge(edgeID)
+            }
+            for node in selectedNodes {
+                removeNode(node.id)
+            }
+        }
+
+        registerUndo(actionName: "Delete") { store in
+            store.withoutUndoRegistration {
+                for node in selectedNodes {
+                    store.addNode(node)
+                }
+                for edge in allEdgesToRemove {
+                    store.addEdge(edge)
+                }
+            }
+            for nodeID in savedSelectedNodeIDs {
+                store.selectNode(nodeID, exclusive: false)
+            }
+            for edgeID in savedSelectedEdgeIDs {
+                store.selectEdge(edgeID, exclusive: false)
+            }
+            store.registerUndo(actionName: "Delete") { store in
+                for nodeID in savedSelectedNodeIDs {
+                    store.selectNode(nodeID, exclusive: false)
+                }
+                for edgeID in savedSelectedEdgeIDs {
+                    store.selectEdge(edgeID, exclusive: false)
+                }
+                store.deleteSelection()
+            }
+        }
+    }
+
     // MARK: - Edge Operations
 
     public func addEdge(_ edge: FlowEdge) {
@@ -108,15 +215,32 @@ public final class FlowStore<Data: Sendable & Hashable> {
         connectionLookup[edge.sourceNodeID, default: []].append(edge)
         connectionLookup[edge.targetNodeID, default: []].append(edge)
         onEdgesChange?([.add(edge)])
+        let captured = edge
+        registerUndo(actionName: "Add Edge") { store in
+            store.removeEdge(captured.id)
+        }
     }
 
     public func removeEdge(_ edgeID: String) {
+        let capturedEdge = edges.first { $0.id == edgeID }
+
         edges.removeAll { $0.id == edgeID }
         rebuildConnectionLookup()
 
         selectedEdgeIDs.remove(edgeID)
 
         onEdgesChange?([.remove(edgeID: edgeID)])
+
+        if let capturedEdge {
+            registerUndo(actionName: "Remove Edge") { store in
+                store.withoutUndoRegistration {
+                    store.addEdge(capturedEdge)
+                }
+                store.registerUndo(actionName: "Remove Edge") { store in
+                    store.removeEdge(edgeID)
+                }
+            }
+        }
     }
 
     // MARK: - Selection
@@ -188,11 +312,15 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     public func selectNodesInRect(_ rect: SelectionRect) {
+        selectInRect(rect)
+    }
+
+    public func selectInRect(_ rect: SelectionRect) {
         guard configuration.multiSelectionEnabled else { return }
 
         let selectionFrame = rect.rect
         var newSelectedNodeIDs = Set<String>()
-        var changes: [NodeChange<Data>] = []
+        var nodeChanges: [NodeChange<Data>] = []
 
         for index in nodes.indices {
             let nodeFrame = nodes[index].frame
@@ -204,12 +332,51 @@ public final class FlowStore<Data: Sendable & Hashable> {
                 newSelectedNodeIDs.insert(nodes[index].id)
             }
             if wasSelected != isInSelection {
-                changes.append(.select(nodeID: nodes[index].id, isSelected: isInSelection))
+                nodeChanges.append(.select(nodeID: nodes[index].id, isSelected: isInSelection))
             }
         }
         selectedNodeIDs = newSelectedNodeIDs
 
-        if !changes.isEmpty { onNodesChange?(changes) }
+        var newSelectedEdgeIDs = Set<String>()
+        var edgeChanges: [EdgeChange] = []
+
+        for index in edges.indices {
+            let edge = edges[index]
+            let isInSelection = edgeIntersectsRect(edge, rect: selectionFrame)
+            let wasSelected = edges[index].isSelected
+            edges[index].isSelected = isInSelection
+            if isInSelection {
+                newSelectedEdgeIDs.insert(edge.id)
+            }
+            if wasSelected != isInSelection {
+                edgeChanges.append(.select(edgeID: edge.id, isSelected: isInSelection))
+            }
+        }
+        selectedEdgeIDs = newSelectedEdgeIDs
+
+        if !nodeChanges.isEmpty { onNodesChange?(nodeChanges) }
+        if !edgeChanges.isEmpty { onEdgesChange?(edgeChanges) }
+    }
+
+    private func edgeIntersectsRect(_ edge: FlowEdge, rect: CGRect) -> Bool {
+        guard let source = handleInfo(nodeID: edge.sourceNodeID, handleID: edge.sourceHandleID),
+              let target = handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
+        else { return false }
+
+        let calculator = Self.pathCalculator(for: edge.pathType)
+        let edgePath = calculator.path(
+            from: source.point, sourcePosition: source.position,
+            to: target.point, targetPosition: target.position
+        )
+
+        let pathBounds = edgePath.path.boundingRect
+        guard rect.intersects(pathBounds) else { return false }
+
+        let strokedPath = edgePath.path.strokedPath(StrokeStyle(lineWidth: 2))
+        let rectPath = Path(rect)
+
+        let intersection = strokedPath.intersection(rectPath)
+        return !intersection.isEmpty
     }
 
     // MARK: - Hover
@@ -433,6 +600,23 @@ public final class FlowStore<Data: Sendable & Hashable> {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
+    // MARK: - Undo Helpers
+
+    private func registerUndo(actionName: String, handler: @escaping @MainActor @Sendable (FlowStore) -> Void) {
+        guard !isUndoRegistrationDisabled, let undoManager else { return }
+        undoManager.registerUndo(withTarget: self) { target in
+            MainActor.assumeIsolated { handler(target) }
+        }
+        undoManager.setActionName(actionName)
+    }
+
+    private func withoutUndoRegistration(_ body: () -> Void) {
+        let previous = isUndoRegistrationDisabled
+        isUndoRegistrationDisabled = true
+        body()
+        isUndoRegistrationDisabled = previous
+    }
+
     // MARK: - Private
 
     private func handlePoint(for position: HandlePosition, in node: FlowNode<Data>) -> CGPoint {
@@ -529,5 +713,6 @@ extension FlowStore where Data: Codable {
         self.hoveredNodeID = nil
         rebuildNodeLookup()
         rebuildConnectionLookup()
+        undoManager?.removeAllActions()
     }
 }

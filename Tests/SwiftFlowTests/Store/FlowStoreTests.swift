@@ -581,15 +581,46 @@ struct FlowStoreTests {
         #expect(store.selectedNodeIDs.contains("n2"))
     }
 
-    @Test("SelectNodesInRect disabled when multiSelection off")
-    func selectNodesInRectDisabled() {
+    @Test("SelectInRect disabled when multiSelection off")
+    func selectInRectDisabled() {
         var config = FlowConfiguration()
         config.multiSelectionEnabled = false
         let store = FlowStore<String>(configuration: config)
         store.addNode(FlowNode(id: "n1", position: CGPoint(x: 10, y: 10), size: CGSize(width: 50, height: 50), data: "A"))
 
-        store.selectNodesInRect(SelectionRect(origin: .zero, size: CGSize(width: 100, height: 100)))
+        store.selectInRect(SelectionRect(origin: .zero, size: CGSize(width: 100, height: 100)))
         #expect(store.selectedNodeIDs.isEmpty)
+        #expect(store.selectedEdgeIDs.isEmpty)
+    }
+
+    @Test("SelectInRect selects edges intersecting the rect")
+    func selectInRectEdges() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(
+            id: "n1", position: CGPoint(x: 0, y: 0),
+            size: CGSize(width: 100, height: 50), data: "A",
+            handles: [HandleDeclaration(id: "out", type: .source, position: .right)]
+        ))
+        store.addNode(FlowNode(
+            id: "n2", position: CGPoint(x: 300, y: 0),
+            size: CGSize(width: 100, height: 50), data: "B",
+            handles: [HandleDeclaration(id: "in", type: .target, position: .left)]
+        ))
+        store.addEdge(FlowEdge(
+            id: "e1", sourceNodeID: "n1", sourceHandleID: "out",
+            targetNodeID: "n2", targetHandleID: "in"
+        ))
+
+        // Selection rect covering the middle area (where the edge passes)
+        store.selectInRect(SelectionRect(
+            origin: CGPoint(x: 120, y: -20),
+            size: CGSize(width: 160, height: 90)
+        ))
+
+        #expect(store.selectedEdgeIDs.contains("e1"))
+        // Nodes are outside the rect
+        #expect(!store.selectedNodeIDs.contains("n1"))
+        #expect(!store.selectedNodeIDs.contains("n2"))
     }
 
     // MARK: - Lookup Consistency

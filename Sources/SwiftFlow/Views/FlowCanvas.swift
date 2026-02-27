@@ -7,6 +7,7 @@ public struct FlowCanvas<
 
     @Bindable var store: FlowStore<NodeData>
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.undoManager) private var undoManager
 
     private let nodeContentBuilder: (FlowNode<NodeData>) -> NodeView
     private let edgeContentBuilder: ((FlowEdge, EdgeGeometry) -> AnyView)?
@@ -109,6 +110,21 @@ public struct FlowCanvas<
             #if os(macOS)
             releaseDragCursorIfNeeded()
             #endif
+        }
+        .focusable()
+        .onKeyPress(.delete) {
+            store.deleteSelection()
+            return .handled
+        }
+        .onKeyPress(.deleteForward) {
+            store.deleteSelection()
+            return .handled
+        }
+        .onAppear {
+            store.undoManager = undoManager
+        }
+        .onChange(of: undoManager) { _, newValue in
+            store.undoManager = newValue
         }
 
         #if os(macOS)
@@ -463,7 +479,7 @@ public struct FlowCanvas<
                         )
                     )
                     store.selectionRect = rect
-                    store.selectNodesInRect(rect)
+                    store.selectInRect(rect)
                 case .nodeMove(let startPositions):
                     let delta = CGSize(
                         width: value.translation.width / store.viewport.zoom,
@@ -487,6 +503,8 @@ public struct FlowCanvas<
                 switch dragMode {
                 case .selection:
                     store.selectionRect = nil
+                case .nodeMove(let startPositions):
+                    store.completeMoveNodes(from: startPositions)
                 case .connection(let handle):
                     let canvasPoint = store.viewport.screenToCanvas(value.location)
                     let targetType: HandleType = (handle.handleType == .source) ? .target : .source
@@ -498,7 +516,7 @@ public struct FlowCanvas<
                     } else {
                         store.cancelConnection()
                     }
-                default:
+                case .none:
                     break
                 }
                 dragMode = .none
@@ -997,7 +1015,7 @@ private struct PreviewNode: View {
             FlowCanvas(store: store) { node in
                 PreviewNode(node)
             }
-            MinimapView(store: store, canvasSize: geometry.size)
+            MiniMap(store: store, canvasSize: geometry.size)
                 .padding(12)
         }
         .onAppear {

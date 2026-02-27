@@ -1,6 +1,6 @@
 import SwiftUI
 
-public struct MinimapView<Data: Sendable & Hashable>: View {
+public struct MiniMap<Data: Sendable & Hashable>: View {
 
     let store: FlowStore<Data>
     let canvasSize: CGSize

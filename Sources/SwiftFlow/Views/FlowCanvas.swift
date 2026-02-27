@@ -56,7 +56,6 @@ public struct FlowCanvas<
     // MARK: - Drag State
 
     @State private var dragMode: CanvasDragMode = .none
-    @State private var lastPanTranslation: CGSize = .zero
     #if os(macOS)
     @State private var pushedDragCursor: DragCursorKind?
     #endif
@@ -95,7 +94,6 @@ public struct FlowCanvas<
             }
         }
         .gesture(primaryDragGesture)
-        .gesture(selectionGesture)
         .gesture(magnifyGesture)
         .gesture(
             SpatialTapGesture()
@@ -116,6 +114,7 @@ public struct FlowCanvas<
         #if os(macOS)
         CanvasHostView(
             onScroll: { delta, location in
+                guard store.configuration.panEnabled else { return }
                 store.pan(by: delta)
             },
             onMagnify: { magnification, location in
@@ -123,11 +122,11 @@ public struct FlowCanvas<
             },
             cursorAt: { location in
                 switch dragMode {
-                case .pan, .nodeMove:
+                case .nodeMove:
                     return .closedHand
                 case .connection:
                     return .crosshair
-                case .none:
+                case .selection, .none:
                     break
                 }
 
@@ -152,18 +151,25 @@ public struct FlowCanvas<
             canvasView
         }
         #else
-        canvasView
-            .onContinuousHover { phase in
-                switch phase {
-                case .active(let location):
-                    let canvasPoint = store.viewport.screenToCanvas(location)
-                    store.setHoveredNode(store.hitTestNode(at: canvasPoint))
-                case .ended:
-                    store.setHoveredNode(nil)
-                @unknown default:
-                    break
-                }
+        CanvasHostView(
+            onPan: { delta in
+                guard store.configuration.panEnabled else { return }
+                store.pan(by: delta)
             }
+        ) {
+            canvasView
+        }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let location):
+                let canvasPoint = store.viewport.screenToCanvas(location)
+                store.setHoveredNode(store.hitTestNode(at: canvasPoint))
+            case .ended:
+                store.setHoveredNode(nil)
+            @unknown default:
+                break
+            }
+        }
         #endif
     }
 
@@ -427,22 +433,27 @@ public struct FlowCanvas<
                               let node = store.nodeLookup[nodeID],
                               node.isDraggable {
                         dragMode = .nodeMove(nodeID: nodeID, startPosition: node.position)
-                    } else if store.configuration.panEnabled {
-                        dragMode = .pan
-                        lastPanTranslation = .zero
+                    } else if store.configuration.selectionEnabled,
+                              store.configuration.multiSelectionEnabled {
+                        let canvasStart = store.viewport.screenToCanvas(value.startLocation)
+                        dragMode = .selection(origin: canvasStart)
                     }
                 }
 
                 switch dragMode {
                 case .none:
                     break
-                case .pan:
-                    let delta = CGSize(
-                        width: value.translation.width - lastPanTranslation.width,
-                        height: value.translation.height - lastPanTranslation.height
+                case .selection(let origin):
+                    let canvasCurrent = store.viewport.screenToCanvas(value.location)
+                    let rect = SelectionRect(
+                        origin: origin,
+                        size: CGSize(
+                            width: canvasCurrent.x - origin.x,
+                            height: canvasCurrent.y - origin.y
+                        )
                     )
-                    store.pan(by: delta)
-                    lastPanTranslation = value.translation
+                    store.selectionRect = rect
+                    store.selectNodesInRect(rect)
                 case .nodeMove(let nodeID, let startPosition):
                     let delta = CGSize(
                         width: value.translation.width / store.viewport.zoom,
@@ -458,11 +469,12 @@ public struct FlowCanvas<
 
                 #if os(macOS)
                 syncDragCursor(for: dragMode)
-                applyCursor(for: value.location)
                 #endif
             }
             .onEnded { value in
                 switch dragMode {
+                case .selection:
+                    store.selectionRect = nil
                 case .connection(let handle):
                     let canvasPoint = store.viewport.screenToCanvas(value.location)
                     let targetType: HandleType = (handle.handleType == .source) ? .target : .source
@@ -478,64 +490,13 @@ public struct FlowCanvas<
                     break
                 }
                 dragMode = .none
-                lastPanTranslation = .zero
 
                 #if os(macOS)
                 syncDragCursor(for: dragMode)
-                applyCursor(for: value.location)
                 #endif
             }
     }
 
-    #if os(macOS)
-    private var selectionGesture: some Gesture {
-        DragGesture(minimumDistance: 5)
-            .modifiers(.shift)
-            .onChanged { value in
-                guard store.configuration.selectionEnabled,
-                      store.configuration.multiSelectionEnabled else { return }
-                let canvasStart = store.viewport.screenToCanvas(value.startLocation)
-                let canvasCurrent = store.viewport.screenToCanvas(value.location)
-                let rect = SelectionRect(
-                    origin: canvasStart,
-                    size: CGSize(
-                        width: canvasCurrent.x - canvasStart.x,
-                        height: canvasCurrent.y - canvasStart.y
-                    )
-                )
-                store.selectionRect = rect
-                store.selectNodesInRect(rect)
-            }
-            .onEnded { _ in
-                store.selectionRect = nil
-            }
-    }
-    #else
-    private var selectionGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.5)
-            .sequenced(before: DragGesture(minimumDistance: 5))
-            .onChanged { value in
-                guard store.configuration.selectionEnabled,
-                      store.configuration.multiSelectionEnabled else { return }
-                if case .second(true, let drag?) = value {
-                    let canvasStart = store.viewport.screenToCanvas(drag.startLocation)
-                    let canvasCurrent = store.viewport.screenToCanvas(drag.location)
-                    let rect = SelectionRect(
-                        origin: canvasStart,
-                        size: CGSize(
-                            width: canvasCurrent.x - canvasStart.x,
-                            height: canvasCurrent.y - canvasStart.y
-                        )
-                    )
-                    store.selectionRect = rect
-                    store.selectNodesInRect(rect)
-                }
-            }
-            .onEnded { _ in
-                store.selectionRect = nil
-            }
-    }
-    #endif
 
     private var magnifyGesture: some Gesture {
         MagnifyGesture()
@@ -585,9 +546,9 @@ public struct FlowCanvas<
     #if os(macOS)
     private func dragCursorKind(for mode: CanvasDragMode) -> DragCursorKind? {
         switch mode {
-        case .pan, .nodeMove: .closedHand
+        case .nodeMove: .closedHand
         case .connection: .crosshair
-        case .none: nil
+        case .selection, .none: nil
         }
     }
 
@@ -614,31 +575,6 @@ public struct FlowCanvas<
         }
     }
 
-    private var dragCursor: NSCursor? {
-        switch dragMode {
-        case .pan: .closedHand
-        case .nodeMove: .closedHand
-        case .connection: .crosshair
-        case .none: nil
-        }
-    }
-
-    private func applyCursor(for location: CGPoint) {
-        if let dragCursor {
-            dragCursor.set()
-            return
-        }
-        let canvasPoint = store.viewport.screenToCanvas(location)
-        if store.hitTestHandle(at: canvasPoint) != nil {
-            NSCursor.crosshair.set()
-        } else if let nodeID = store.hitTestNode(at: canvasPoint),
-                  let node = store.nodeLookup[nodeID],
-                  node.isDraggable {
-            NSCursor.openHand.set()
-        } else {
-            NSCursor.arrow.set()
-        }
-    }
     #endif
 
     // MARK: - Drawing: Edges (symbol-based)
@@ -737,7 +673,7 @@ public struct FlowCanvas<
 
 private enum CanvasDragMode {
     case none
-    case pan
+    case selection(origin: CGPoint)
     case nodeMove(nodeID: String, startPosition: CGPoint)
     case connection(HandleHitResult)
 }

@@ -116,3 +116,82 @@ final class CanvasNSHostView<Content: View>: NSView {
     }
 }
 #endif
+
+#if os(iOS)
+import SwiftUI
+import UIKit
+
+struct CanvasHostView<Content: View>: UIViewRepresentable {
+
+    let onPan: @MainActor (CGSize) -> Void
+    @ViewBuilder var content: Content
+
+    func makeUIView(context: Context) -> CanvasUIHostView<Content> {
+        let hostView = CanvasUIHostView<Content>()
+        hostView.onPan = onPan
+        let hosting = UIHostingController(rootView: content)
+        hosting.view.translatesAutoresizingMaskIntoConstraints = false
+        hosting.view.backgroundColor = .clear
+        hostView.addSubview(hosting.view)
+        NSLayoutConstraint.activate([
+            hosting.view.topAnchor.constraint(equalTo: hostView.topAnchor),
+            hosting.view.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
+            hosting.view.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
+            hosting.view.bottomAnchor.constraint(equalTo: hostView.bottomAnchor),
+        ])
+        hostView.hostingController = hosting
+        return hostView
+    }
+
+    func updateUIView(_ uiView: CanvasUIHostView<Content>, context: Context) {
+        uiView.onPan = onPan
+        uiView.hostingController?.rootView = content
+    }
+}
+
+final class CanvasUIHostView<Content: View>: UIView {
+
+    var onPan: (@MainActor (CGSize) -> Void)?
+    var hostingController: UIHostingController<Content>?
+
+    private var lastPanTranslation: CGPoint = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupGestures()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupGestures()
+    }
+
+    private func setupGestures() {
+        let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        panGesture.minimumNumberOfTouches = 2
+        panGesture.maximumNumberOfTouches = 2
+        addGestureRecognizer(panGesture)
+    }
+
+    @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        let translation = gesture.translation(in: self)
+        switch gesture.state {
+        case .began:
+            lastPanTranslation = .zero
+        case .changed:
+            let delta = CGSize(
+                width: translation.x - lastPanTranslation.x,
+                height: translation.y - lastPanTranslation.y
+            )
+            lastPanTranslation = CGPoint(x: translation.x, y: translation.y)
+            MainActor.assumeIsolated {
+                onPan?(delta)
+            }
+        case .ended, .cancelled:
+            lastPanTranslation = .zero
+        default:
+            break
+        }
+    }
+}
+#endif

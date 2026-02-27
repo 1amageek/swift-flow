@@ -11,6 +11,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var viewport: Viewport
     public var selectedNodeIDs: Set<String>
     public var selectedEdgeIDs: Set<String>
+    public private(set) var hoveredNodeID: String?
     public var configuration: FlowConfiguration
 
     // MARK: - Lookup Tables
@@ -206,6 +207,23 @@ public final class FlowStore<Data: Sendable & Hashable> {
         selectedNodeIDs = newSelectedNodeIDs
 
         if !changes.isEmpty { onNodesChange?(changes) }
+    }
+
+    // MARK: - Hover
+
+    public func setHoveredNode(_ nodeID: String?) {
+        guard hoveredNodeID != nodeID else { return }
+        if let oldID = hoveredNodeID,
+           let index = nodes.firstIndex(where: { $0.id == oldID }) {
+            nodes[index].isHovered = false
+            nodeLookup[oldID] = nodes[index]
+        }
+        if let newID = nodeID,
+           let index = nodes.firstIndex(where: { $0.id == newID }) {
+            nodes[index].isHovered = true
+            nodeLookup[newID] = nodes[index]
+        }
+        hoveredNodeID = nodeID
     }
 
     // MARK: - Viewport
@@ -485,6 +503,7 @@ extension FlowStore where Data: Codable {
         var exportedNodes = nodes
         for index in exportedNodes.indices {
             exportedNodes[index].isSelected = false
+            exportedNodes[index].isHovered = false
             exportedNodes[index].isDraggable = true
         }
         var exportedEdges = edges
@@ -504,6 +523,7 @@ extension FlowStore where Data: Codable {
         self.viewport = document.viewport
         self.selectedNodeIDs = []
         self.selectedEdgeIDs = []
+        self.hoveredNodeID = nil
         rebuildNodeLookup()
         rebuildConnectionLookup()
     }

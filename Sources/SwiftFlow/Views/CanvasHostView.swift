@@ -6,6 +6,7 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
     let onScroll: @MainActor (CGSize, CGPoint) -> Void
     let onMagnify: @MainActor (CGFloat, CGPoint) -> Void
     let cursorAt: @MainActor (CGPoint) -> NSCursor
+    let onMouseExited: @MainActor () -> Void
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> CanvasNSHostView<Content> {
@@ -13,6 +14,7 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
         hostView.onScroll = onScroll
         hostView.onMagnify = onMagnify
         hostView.cursorAt = cursorAt
+        hostView.onMouseExited = onMouseExited
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hostView.addSubview(hosting)
@@ -30,6 +32,7 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
         nsView.onScroll = onScroll
         nsView.onMagnify = onMagnify
         nsView.cursorAt = cursorAt
+        nsView.onMouseExited = onMouseExited
         nsView.hostingView?.rootView = content
     }
 }
@@ -39,6 +42,7 @@ final class CanvasNSHostView<Content: View>: NSView {
     var onScroll: (@MainActor (CGSize, CGPoint) -> Void)?
     var onMagnify: (@MainActor (CGFloat, CGPoint) -> Void)?
     var cursorAt: (@MainActor (CGPoint) -> NSCursor)?
+    var onMouseExited: (@MainActor () -> Void)?
     var hostingView: NSHostingView<Content>?
 
     private var trackingArea: NSTrackingArea?
@@ -70,6 +74,9 @@ final class CanvasNSHostView<Content: View>: NSView {
 
     override func mouseExited(with event: NSEvent) {
         NSCursor.arrow.set()
+        MainActor.assumeIsolated {
+            onMouseExited?()
+        }
     }
 
     override func scrollWheel(with event: NSEvent) {

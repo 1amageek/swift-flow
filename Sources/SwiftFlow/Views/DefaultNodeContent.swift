@@ -21,15 +21,19 @@ public struct DefaultNodeContent<NodeData: Sendable & Hashable>: NodeContent {
                 .fill(.background)
                 .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
                 .shadow(
-                    color: node.isSelected ? Color.accentColor.opacity(0.35) : .black.opacity(0.08),
-                    radius: node.isSelected ? 8 : 3,
-                    y: node.isSelected ? 0 : 2
+                    color: node.isSelected ? Color.accentColor.opacity(0.35)
+                         : node.isHovered ? .black.opacity(0.14)
+                         : .black.opacity(0.08),
+                    radius: node.isSelected ? 8 : node.isHovered ? 5 : 3,
+                    y: node.isSelected ? 0 : node.isHovered ? 1 : 2
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(
-                            node.isSelected ? Color.accentColor : Color.primary.opacity(0.12),
-                            lineWidth: node.isSelected ? 1.5 : 0.5
+                            node.isSelected ? Color.accentColor
+                              : node.isHovered ? Color.primary.opacity(0.25)
+                              : Color.primary.opacity(0.12),
+                            lineWidth: node.isSelected ? 1.5 : node.isHovered ? 0.75 : 0.5
                         )
                 }
                 .overlay {

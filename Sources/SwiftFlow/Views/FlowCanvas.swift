@@ -75,21 +75,38 @@ public struct FlowCanvas<
                 }
 
                 let canvasPoint = store.viewport.screenToCanvas(location)
+                let nodeID = store.hitTestNode(at: canvasPoint)
+                store.setHoveredNode(nodeID)
+
                 if store.hitTestHandle(at: canvasPoint) != nil {
                     return .crosshair
                 }
-                if let nodeID = store.hitTestNode(at: canvasPoint),
+                if let nodeID,
                    let node = store.nodeLookup[nodeID],
                    node.isDraggable {
                     return .openHand
                 }
                 return .arrow
+            },
+            onMouseExited: {
+                store.setHoveredNode(nil)
             }
         ) {
             canvasView
         }
         #else
         canvasView
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    let canvasPoint = store.viewport.screenToCanvas(location)
+                    store.setHoveredNode(store.hitTestNode(at: canvasPoint))
+                case .ended:
+                    store.setHoveredNode(nil)
+                @unknown default:
+                    break
+                }
+            }
         #endif
     }
 
@@ -636,28 +653,28 @@ private struct PreviewNodeContent: NodeContent {
         .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
     }
 
-    // MARK: - Card
-
     private var card: some View {
         RoundedRectangle(cornerRadius: 10)
             .fill(.background)
             .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
             .shadow(
-                color: node.isSelected ? Color.accentColor.opacity(0.4) : .black.opacity(0.08),
-                radius: node.isSelected ? 8 : 3,
-                y: node.isSelected ? 0 : 2
+                color: node.isSelected ? Color.accentColor.opacity(0.4)
+                     : node.isHovered ? .black.opacity(0.14)
+                     : .black.opacity(0.08),
+                radius: node.isSelected ? 8 : node.isHovered ? 5 : 3,
+                y: node.isSelected ? 0 : node.isHovered ? 1 : 2
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
                     .strokeBorder(
-                        node.isSelected ? Color.accentColor : Color.primary.opacity(0.1),
-                        lineWidth: node.isSelected ? 1.5 : 0.5
+                        node.isSelected ? Color.accentColor
+                          : node.isHovered ? Color.primary.opacity(0.25)
+                          : Color.primary.opacity(0.1),
+                        lineWidth: node.isSelected ? 1.5 : node.isHovered ? 0.75 : 0.5
                     )
             }
             .overlay(alignment: .leading) { cardContent }
     }
-
-    // MARK: - Content (varies by category)
 
     @ViewBuilder
     private var cardContent: some View {
@@ -675,7 +692,6 @@ private struct PreviewNodeContent: NodeContent {
         }
     }
 
-    /// Trigger: icon + title + pulsing live indicator
     private var triggerContent: some View {
         HStack(spacing: 10) {
             iconView
@@ -692,7 +708,6 @@ private struct PreviewNodeContent: NodeContent {
         .padding(.horizontal, 10)
     }
 
-    /// Logic: centered icon + title (hub-style)
     private var logicContent: some View {
         VStack(spacing: 2) {
             Image(systemName: node.data.icon)
@@ -706,7 +721,6 @@ private struct PreviewNodeContent: NodeContent {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Network: icon + title + method badge
     private var networkContent: some View {
         HStack(spacing: 10) {
             iconView
@@ -736,7 +750,6 @@ private struct PreviewNodeContent: NodeContent {
         .padding(.trailing, 8)
     }
 
-    /// Output: icon + title + notification count
     private var outputContent: some View {
         HStack(spacing: 10) {
             iconView
@@ -756,7 +769,6 @@ private struct PreviewNodeContent: NodeContent {
         .padding(.horizontal, 10)
     }
 
-    /// Standard: icon + title + subtitle
     private var standardContent: some View {
         HStack(spacing: 10) {
             iconView
@@ -783,8 +795,6 @@ private struct PreviewNodeContent: NodeContent {
             .frame(width: 30, height: 30)
             .background(categoryColor, in: RoundedRectangle(cornerRadius: 7))
     }
-
-    // MARK: - Category Color
 
     private var categoryColor: Color {
         switch node.data.category {

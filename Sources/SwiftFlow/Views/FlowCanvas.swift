@@ -292,7 +292,7 @@ public struct FlowCanvas<
                 continue
             }
 
-            let calculator = pathCalculator(for: edge.pathType)
+            let calculator = FlowStore<NodeData>.pathCalculator(for: edge.pathType)
             let edgePath = calculator.path(
                 from: source.point, sourcePosition: source.position,
                 to: target.point, targetPosition: target.position
@@ -416,7 +416,7 @@ public struct FlowCanvas<
         let screenTo = draft.currentPoint
 
         let targetPosition = inferTargetPosition(from: screenFrom, to: screenTo)
-        let calculator = pathCalculator(for: store.configuration.defaultEdgePathType)
+        let calculator = FlowStore<NodeData>.pathCalculator(for: store.configuration.defaultEdgePathType)
         let edgePath = calculator.path(
             from: screenFrom, sourcePosition: draft.sourceHandlePosition,
             to: screenTo, targetPosition: targetPosition
@@ -640,7 +640,7 @@ public struct FlowCanvas<
               let target = store.handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
         else { return nil }
 
-        let calculator = pathCalculator(for: edge.pathType)
+        let calculator = FlowStore<NodeData>.pathCalculator(for: edge.pathType)
         let edgePath = calculator.path(
             from: source.point, sourcePosition: source.position,
             to: target.point, targetPosition: target.position
@@ -679,14 +679,6 @@ public struct FlowCanvas<
         return Path(path.cgPath.copy(using: [transform]) ?? path.cgPath)
     }
 
-    private func pathCalculator(for type: EdgePathType) -> any EdgePathCalculating {
-        switch type {
-        case .bezier: BezierEdgePath()
-        case .straight: StraightEdgePath()
-        case .smoothStep: SmoothStepEdgePath()
-        case .simpleBezier: SimpleBezierEdgePath()
-        }
-    }
 
     private func inferTargetPosition(from source: CGPoint, to target: CGPoint) -> HandlePosition {
         let dx = target.x - source.x

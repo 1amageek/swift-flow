@@ -11,9 +11,10 @@ public struct Viewport: Sendable, Hashable, Codable {
     }
 
     public func screenToCanvas(_ point: CGPoint) -> CGPoint {
-        CGPoint(
-            x: (point.x - offset.x) / zoom,
-            y: (point.y - offset.y) / zoom
+        let safeZoom = max(zoom, 0.01)
+        return CGPoint(
+            x: (point.x - offset.x) / safeZoom,
+            y: (point.y - offset.y) / safeZoom
         )
     }
 

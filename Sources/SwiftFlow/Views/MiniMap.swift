@@ -79,8 +79,10 @@ public struct MiniMap<Data: Sendable & Hashable>: View {
                 )
                 let dx = canvasX - viewportCenter.x
                 let dy = canvasY - viewportCenter.y
-                store.viewport.offset.x -= dx * store.viewport.zoom
-                store.viewport.offset.y -= dy * store.viewport.zoom
+                store.pan(by: CGSize(
+                    width: -(dx * store.viewport.zoom),
+                    height: -(dy * store.viewport.zoom)
+                ))
             }
     }
 }

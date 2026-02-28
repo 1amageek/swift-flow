@@ -84,6 +84,10 @@ struct FlowStoreUndoTests {
     @Test("Undo addEdge removes the edge")
     func undoAddEdge() {
         let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.undoManager = undoManager
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         #expect(store.edges.count == 1)
 
@@ -94,6 +98,10 @@ struct FlowStoreUndoTests {
     @Test("Redo addEdge restores the edge")
     func redoAddEdge() {
         let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.undoManager = undoManager
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         undoManager.undo()
         undoManager.redo()
@@ -107,6 +115,8 @@ struct FlowStoreUndoTests {
     func undoRemoveEdge() {
         let (store, undoManager) = makeStore()
         store.undoManager = nil
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         store.undoManager = undoManager
 
@@ -122,6 +132,8 @@ struct FlowStoreUndoTests {
     func redoRemoveEdge() {
         let (store, undoManager) = makeStore()
         store.undoManager = nil
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         store.undoManager = undoManager
 

@@ -47,12 +47,40 @@ struct FlowStoreTests {
     @Test("Add and remove edges")
     func addRemoveEdges() {
         let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
         let edge = FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2")
         store.addEdge(edge)
         #expect(store.edges.count == 1)
         #expect(store.connectionLookup["n1"]?.count == 1)
 
         store.removeEdge("e1")
+        #expect(store.edges.isEmpty)
+    }
+
+    @Test("addEdge rejects duplicate edge ID")
+    func addEdgeDuplicateID() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
+        #expect(store.edges.count == 1)
+    }
+
+    @Test("addEdge rejects edge with non-existent source node")
+    func addEdgeDanglingSource() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "nonexistent", targetNodeID: "n2"))
+        #expect(store.edges.isEmpty)
+    }
+
+    @Test("addEdge rejects edge with non-existent target node")
+    func addEdgeDanglingTarget() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "nonexistent"))
         #expect(store.edges.isEmpty)
     }
 
@@ -77,6 +105,8 @@ struct FlowStoreTests {
     @Test("Select and deselect edges")
     func edgeSelection() {
         let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
 
         store.selectEdge("e1")
@@ -91,6 +121,7 @@ struct FlowStoreTests {
     func clearSelection() {
         let store = FlowStore<String>()
         store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         store.selectNode("n1", exclusive: false)
         store.selectEdge("e1", exclusive: false)
@@ -266,6 +297,9 @@ struct FlowStoreTests {
     @Test("Edges for node query")
     func edgesForNode() {
         let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.addNode(FlowNode(id: "n3", position: CGPoint(x: 400, y: 0), data: "C"))
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         store.addEdge(FlowEdge(id: "e2", sourceNodeID: "n2", targetNodeID: "n3"))
         store.addEdge(FlowEdge(id: "e3", sourceNodeID: "n3", targetNodeID: "n1"))
@@ -725,6 +759,9 @@ struct FlowStoreTests {
     @Test("Additive select toggles edge into selection")
     func additiveSelectEdge() {
         let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.addNode(FlowNode(id: "n3", position: CGPoint(x: 400, y: 0), data: "C"))
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         store.addEdge(FlowEdge(id: "e2", sourceNodeID: "n2", targetNodeID: "n3"))
 

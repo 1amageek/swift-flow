@@ -224,6 +224,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
     // MARK: - Edge Operations
 
     public func addEdge(_ edge: FlowEdge) {
+        guard !edges.contains(where: { $0.id == edge.id }) else { return }
+        guard nodeLookup[edge.sourceNodeID] != nil,
+              nodeLookup[edge.targetNodeID] != nil else { return }
         edges.append(edge)
         connectionLookup[edge.sourceNodeID, default: []].append(edge)
         connectionLookup[edge.targetNodeID, default: []].append(edge)
@@ -646,6 +649,10 @@ public final class FlowStore<Data: Sendable & Hashable> {
     private func tickEdgeDashPhase(dt: TimeInterval) {
         guard hasAnimatedEdges else { return }
         edgeDashPhase += CGFloat(dt) * 30
+        let patternLength = configuration.edgeStyle.animatedDashPattern.reduce(0, +)
+        if patternLength > 0 {
+            edgeDashPhase = edgeDashPhase.truncatingRemainder(dividingBy: patternLength)
+        }
     }
 
     func updateAnimatedEdgesFlag() {
@@ -789,7 +796,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         return nil
     }
 
-    private static func pathCalculator(for type: EdgePathType) -> any EdgePathCalculating {
+    public static func pathCalculator(for type: EdgePathType) -> any EdgePathCalculating {
         switch type {
         case .bezier: BezierEdgePath()
         case .straight: StraightEdgePath()
@@ -938,6 +945,16 @@ extension FlowStore where Data: Codable {
         self.selectedEdgeIDs = []
         self.hoveredNodeID = nil
         rebuildNodeLookup()
+
+        // Filter out edges with duplicate IDs or dangling node references
+        var seenEdgeIDs = Set<String>()
+        edges.removeAll { edge in
+            if !seenEdgeIDs.insert(edge.id).inserted { return true }
+            if nodeLookup[edge.sourceNodeID] == nil { return true }
+            if nodeLookup[edge.targetNodeID] == nil { return true }
+            return false
+        }
+
         rebuildConnectionLookup()
         updateAnimatedEdgesFlag()
         undoManager?.removeAllActions()

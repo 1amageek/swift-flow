@@ -11,6 +11,11 @@ public struct FlowCanvas<
 
     private let nodeContentBuilder: (FlowNode<NodeData>) -> NodeView
     private let edgeContentBuilder: ((FlowEdge, EdgeGeometry) -> AnyView)?
+    private var nodeAccessoryBuilder: ((FlowNode<NodeData>) -> AnyView)?
+    private var edgeAccessoryBuilder: ((FlowEdge) -> AnyView)?
+    private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
+    private var edgeAccessoryPlacement: AccessoryPlacement = .top
+    private var accessoryAnimation: Animation? = .easeOut(duration: 0.15)
 
     // MARK: - Init: Default
 
@@ -18,6 +23,8 @@ public struct FlowCanvas<
         self.store = store
         self.nodeContentBuilder = { node in DefaultNodeContent(node: node) }
         self.edgeContentBuilder = nil
+        self.nodeAccessoryBuilder = nil
+        self.edgeAccessoryBuilder = nil
     }
 
     // MARK: - Init: Custom nodes
@@ -29,6 +36,8 @@ public struct FlowCanvas<
         self.store = store
         self.nodeContentBuilder = nodeContent
         self.edgeContentBuilder = nil
+        self.nodeAccessoryBuilder = nil
+        self.edgeAccessoryBuilder = nil
     }
 
     // MARK: - Init: Custom nodes + custom edges
@@ -41,6 +50,8 @@ public struct FlowCanvas<
         self.store = store
         self.nodeContentBuilder = nodeContent
         self.edgeContentBuilder = { edge, geometry in AnyView(edgeContent(edge, geometry)) }
+        self.nodeAccessoryBuilder = nil
+        self.edgeAccessoryBuilder = nil
     }
 
     // MARK: - Init: Default nodes + custom edges
@@ -52,6 +63,64 @@ public struct FlowCanvas<
         self.store = store
         self.nodeContentBuilder = { node in DefaultNodeContent(node: node) }
         self.edgeContentBuilder = { edge, geometry in AnyView(edgeContent(edge, geometry)) }
+        self.nodeAccessoryBuilder = nil
+        self.edgeAccessoryBuilder = nil
+    }
+
+    // MARK: - Accessory Modifiers
+
+    /// Attaches a view that appears near a selected node.
+    ///
+    /// The view is shown only when exactly one node is selected and
+    /// dismissed automatically when selection clears.
+    /// - Parameters:
+    ///   - placement: Direction relative to the node center. Flips if clipped.
+    ///   - animation: Appear/disappear animation. Pass `nil` to disable.
+    ///   - content: A view builder receiving the selected node.
+    public func nodeAccessory<A: View>(
+        placement: AccessoryPlacement = .top,
+        animation: Animation? = .easeOut(duration: 0.15),
+        @ViewBuilder content: @escaping (FlowNode<NodeData>) -> A
+    ) -> FlowCanvas {
+        var copy = self
+        copy.nodeAccessoryBuilder = { node in AnyView(content(node)) }
+        copy.nodeAccessoryPlacement = { _ in placement }
+        copy.accessoryAnimation = animation
+        return copy
+    }
+
+    /// Attaches a view that appears near a selected node, with per-node
+    /// placement determined by the `placement` closure.
+    public func nodeAccessory<A: View>(
+        placement: @escaping (FlowNode<NodeData>) -> AccessoryPlacement,
+        animation: Animation? = .easeOut(duration: 0.15),
+        @ViewBuilder content: @escaping (FlowNode<NodeData>) -> A
+    ) -> FlowCanvas {
+        var copy = self
+        copy.nodeAccessoryBuilder = { node in AnyView(content(node)) }
+        copy.nodeAccessoryPlacement = placement
+        copy.accessoryAnimation = animation
+        return copy
+    }
+
+    /// Attaches a view that appears near a selected edge.
+    ///
+    /// The view is shown only when exactly one edge is selected and
+    /// dismissed automatically when selection clears.
+    /// - Parameters:
+    ///   - placement: Direction relative to the edge midpoint. Flips if clipped.
+    ///   - animation: Appear/disappear animation. Pass `nil` to disable.
+    ///   - content: A view builder receiving the selected edge.
+    public func edgeAccessory<A: View>(
+        placement: AccessoryPlacement = .top,
+        animation: Animation? = .easeOut(duration: 0.15),
+        @ViewBuilder content: @escaping (FlowEdge) -> A
+    ) -> FlowCanvas {
+        var copy = self
+        copy.edgeAccessoryBuilder = { edge in AnyView(content(edge)) }
+        copy.edgeAccessoryPlacement = placement
+        copy.accessoryAnimation = animation
+        return copy
     }
 
     // MARK: - Drag State
@@ -131,8 +200,10 @@ public struct FlowCanvas<
             store.undoManager = newValue
         }
 
+        let hasAccessory = nodeAccessoryBuilder != nil || edgeAccessoryBuilder != nil
+
         #if os(macOS)
-        CanvasHostView(
+        let hostView = CanvasHostView(
             onScroll: { delta, location in
                 guard store.configuration.panEnabled else { return }
                 store.pan(by: delta)
@@ -170,8 +241,25 @@ public struct FlowCanvas<
         ) {
             canvasView
         }
+
+        if hasAccessory {
+            ZStack {
+                hostView
+                AccessoryOverlay(
+                    store: store,
+                    canvasSize: size,
+                    nodeAccessoryBuilder: nodeAccessoryBuilder,
+                    edgeAccessoryBuilder: edgeAccessoryBuilder,
+                    nodeAccessoryPlacement: nodeAccessoryPlacement,
+                    edgeAccessoryPlacement: edgeAccessoryPlacement,
+                    animation: accessoryAnimation
+                )
+            }
+        } else {
+            hostView
+        }
         #else
-        CanvasHostView(
+        let hostView = CanvasHostView(
             onPan: { delta in
                 guard store.configuration.panEnabled else { return }
                 store.pan(by: delta)
@@ -189,6 +277,23 @@ public struct FlowCanvas<
             @unknown default:
                 break
             }
+        }
+
+        if hasAccessory {
+            ZStack {
+                hostView
+                AccessoryOverlay(
+                    store: store,
+                    canvasSize: size,
+                    nodeAccessoryBuilder: nodeAccessoryBuilder,
+                    edgeAccessoryBuilder: edgeAccessoryBuilder,
+                    nodeAccessoryPlacement: nodeAccessoryPlacement,
+                    edgeAccessoryPlacement: edgeAccessoryPlacement,
+                    animation: accessoryAnimation
+                )
+            }
+        } else {
+            hostView
         }
         #endif
     }
@@ -1040,6 +1145,62 @@ private struct PreviewNode: View {
         ZStack(alignment: .bottomTrailing) {
             FlowCanvas(store: store) { node in
                 PreviewNode(node)
+            }
+            .nodeAccessory(placement: { node in
+                switch node.data.category {
+                case "Trigger", "Data", "Transform":
+                    return .bottom
+                default:
+                    return .top
+                }
+            }) { node in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(node.data.title)
+                        .font(.headline)
+                    Text(node.data.category)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Divider()
+                    HStack(spacing: 12) {
+                        Button {
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
+                                .font(.caption)
+                        }
+                        Button(role: .destructive) {
+                            store.removeNode(node.id)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                                .font(.caption)
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(width: 180)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+            }
+            .edgeAccessory { edge in
+                HStack(spacing: 8) {
+                    if let label = edge.label {
+                        Text(label)
+                            .font(.caption.bold())
+                    } else {
+                        Text("Edge")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button(role: .destructive) {
+                        store.removeEdge(edge.id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+                .shadow(color: .black.opacity(0.12), radius: 6, y: 3)
             }
 
             VStack(alignment: .trailing, spacing: 8) {

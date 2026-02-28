@@ -308,6 +308,22 @@ store.onEdgesChange = { changes in
 }
 ```
 
+### Double-Tap
+
+Respond to double-tap (double-click) on nodes and edges:
+
+```swift
+store.onNodeDoubleTap = { nodeID in
+    print("Double-tapped node: \(nodeID)")
+}
+
+store.onEdgeDoubleTap = { edgeID in
+    print("Double-tapped edge: \(edgeID)")
+}
+```
+
+Double-tap detection uses manual timing comparison instead of SwiftUI's `onTapGesture(count: 2)`, which would delay single-tap recognition by ~300ms. Single taps always fire immediately; a second tap within 300ms on the same target triggers the double-tap callback.
+
 ## FlowConfiguration
 
 All behavior is configurable:
@@ -356,7 +372,7 @@ store.updateNodeSize("node-1", size: size)  // resize node
 ### Edge Operations
 
 ```swift
-store.addEdge(edge)                     // add an edge
+store.addEdge(edge)                     // add an edge (rejects duplicate IDs and dangling node references)
 store.removeEdge("edge-1")              // remove an edge
 ```
 
@@ -377,6 +393,14 @@ store.clearSelection()
 store.pan(by: CGSize(width: 10, height: 0))  // pan canvas
 store.zoom(by: 1.5, anchor: center)           // zoom around anchor point
 store.fitToContent(canvasSize: size)           // fit all nodes in view
+```
+
+### Undo / Redo
+
+Assign an `UndoManager` to enable undo/redo for node add/remove, edge add/remove, node move, and selection deletion:
+
+```swift
+store.undoManager = undoManager
 ```
 
 ### Queries
@@ -416,6 +440,7 @@ store.load(document)
 | Zoom | Pinch trackpad / scroll+magnify | Pinch gesture |
 | Connect | Drag from handle to handle | Drag from handle to handle |
 | Select node/edge | Click | Tap |
+| Double-tap node/edge | Double-click | Double-tap |
 | Add to selection | Command + Click | Command + Tap |
 | Multi-select (rect) | Shift + drag rectangle | Long press + drag |
 | Hover | Mouse over node | Pointer hover |

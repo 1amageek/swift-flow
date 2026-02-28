@@ -65,6 +65,10 @@ public struct FlowCanvas<
 
     @State private var lastMagnification: CGFloat = 1.0
 
+    // MARK: - Double-Tap Detection
+
+    @State private var doubleTapDetector = DoubleTapDetector()
+
     public var body: some View {
         GeometryReader { geometry in
             canvasBody(in: geometry.size)
@@ -546,7 +550,19 @@ public struct FlowCanvas<
     private func handleTap(at location: CGPoint, isAdditive: Bool = false) {
         let canvasPoint = store.viewport.screenToCanvas(location)
 
+        // Determine tap target via hit testing
+        let currentTarget: DoubleTapTarget
         if let nodeID = store.hitTestNode(at: canvasPoint) {
+            currentTarget = .node(nodeID)
+        } else if let edgeID = store.hitTestEdge(at: canvasPoint) {
+            currentTarget = .edge(edgeID)
+        } else {
+            currentTarget = .none
+        }
+
+        // Perform single-tap action immediately (no delay)
+        switch currentTarget {
+        case .node(let nodeID):
             if isAdditive {
                 if store.selectedNodeIDs.contains(nodeID) {
                     store.deselectNode(nodeID)
@@ -556,7 +572,7 @@ public struct FlowCanvas<
             } else {
                 store.selectNode(nodeID)
             }
-        } else if let edgeID = store.hitTestEdge(at: canvasPoint) {
+        case .edge(let edgeID):
             if isAdditive {
                 if store.selectedEdgeIDs.contains(edgeID) {
                     store.deselectEdge(edgeID)
@@ -566,8 +582,26 @@ public struct FlowCanvas<
             } else {
                 store.selectEdge(edgeID)
             }
-        } else if !isAdditive {
-            store.clearSelection()
+        case .none:
+            if !isAdditive {
+                store.clearSelection()
+            }
+        }
+
+        // Double-tap detection (only for non-additive taps on actual targets)
+        if !isAdditive, currentTarget != .none {
+            if doubleTapDetector.recordTap(target: currentTarget) {
+                switch currentTarget {
+                case .node(let nodeID):
+                    store.onNodeDoubleTap?(nodeID)
+                case .edge(let edgeID):
+                    store.onEdgeDoubleTap?(edgeID)
+                case .none:
+                    break
+                }
+            }
+        } else {
+            doubleTapDetector.reset()
         }
     }
 

@@ -47,6 +47,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var onNodesChange: (([NodeChange<Data>]) -> Void)?
     public var onEdgesChange: (([EdgeChange]) -> Void)?
     public var onConnect: ((ConnectionProposal) -> Void)?
+    public var onNodeDoubleTap: ((String) -> Void)?
+    public var onEdgeDoubleTap: ((String) -> Void)?
 
     // MARK: - Init
 

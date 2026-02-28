@@ -519,6 +519,10 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     /// Fits the viewport to show all nodes with an animation.
+    ///
+    /// When zoom changes, offset is derived from zoom each frame (same as
+    /// `zoom(by:anchor:animation:)`) to prevent wobble caused by independent
+    /// offset/zoom animations settling at different times.
     public func fitToContent(canvasSize: CGSize, padding: CGFloat = 50, animation: FlowAnimation) {
         guard !nodes.isEmpty else { return }
         let bounds = nodeBounds()
@@ -532,8 +536,40 @@ public final class FlowStore<Data: Sendable & Hashable> {
             x: -bounds.minX * targetZoom + (canvasSize.width - bounds.width * targetZoom) / 2,
             y: -bounds.minY * targetZoom + (canvasSize.height - bounds.height * targetZoom) / 2
         )
-        let target = Viewport(offset: targetOffset, zoom: targetZoom)
-        setViewport(target, animation: animation)
+
+        let initialZoom = viewport.zoom
+        let ratio = initialZoom > 0 ? targetZoom / initialZoom : 1.0
+
+        if abs(ratio - 1.0) < 1e-9 {
+            // Zoom unchanged — animate offset only (no coupling issue)
+            let target = Viewport(offset: targetOffset, zoom: targetZoom)
+            setViewport(target, animation: animation)
+        } else {
+            // Derive a virtual anchor so offset tracks zoom each frame.
+            // Given: targetOffset = anchor - (anchor - initialOffset) * ratio
+            // Solve: anchor = (targetOffset - initialOffset * ratio) / (1 - ratio)
+            let initialOffset = viewport.offset
+            let anchor = CGPoint(
+                x: (targetOffset.x - initialOffset.x * ratio) / (1 - ratio),
+                y: (targetOffset.y - initialOffset.y * ratio) / (1 - ratio)
+            )
+
+            zoomAnchorState = (anchor: anchor, initialOffset: initialOffset, initialZoom: initialZoom)
+
+            // Clear independent offset animations — offset will be computed from zoom
+            viewportAnimations.x = nil
+            viewportAnimations.y = nil
+
+            let timing = animation.timing
+            if var anim = viewportAnimations.zoom {
+                anim.retarget(to: targetZoom)
+                viewportAnimations.zoom = anim
+            } else {
+                viewportAnimations.zoom = PropertyAnimation(from: initialZoom, to: targetZoom, timing: timing)
+            }
+
+            startAnimationLoopIfNeeded()
+        }
     }
 
     /// Animates multiple node positions simultaneously.

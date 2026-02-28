@@ -15,7 +15,7 @@ public struct FlowCanvas<
     private var edgeAccessoryBuilder: ((FlowEdge) -> AnyView)?
     private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
-    private var accessoryAnimation: Animation? = .easeOut(duration: 0.15)
+    private var accessoryAnimation: Animation? = .spring(duration: 0.25, bounce: 0.05)
 
     // MARK: - Init: Default
 
@@ -79,7 +79,7 @@ public struct FlowCanvas<
     ///   - content: A view builder receiving the selected node.
     public func nodeAccessory<A: View>(
         placement: AccessoryPlacement = .top,
-        animation: Animation? = .easeOut(duration: 0.15),
+        animation: Animation? = .spring(duration: 0.25, bounce: 0.05),
         @ViewBuilder content: @escaping (FlowNode<NodeData>) -> A
     ) -> FlowCanvas {
         var copy = self
@@ -93,7 +93,7 @@ public struct FlowCanvas<
     /// placement determined by the `placement` closure.
     public func nodeAccessory<A: View>(
         placement: @escaping (FlowNode<NodeData>) -> AccessoryPlacement,
-        animation: Animation? = .easeOut(duration: 0.15),
+        animation: Animation? = .spring(duration: 0.25, bounce: 0.05),
         @ViewBuilder content: @escaping (FlowNode<NodeData>) -> A
     ) -> FlowCanvas {
         var copy = self
@@ -113,7 +113,7 @@ public struct FlowCanvas<
     ///   - content: A view builder receiving the selected edge.
     public func edgeAccessory<A: View>(
         placement: AccessoryPlacement = .top,
-        animation: Animation? = .easeOut(duration: 0.15),
+        animation: Animation? = .spring(duration: 0.25, bounce: 0.05),
         @ViewBuilder content: @escaping (FlowEdge) -> A
     ) -> FlowCanvas {
         var copy = self

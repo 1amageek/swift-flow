@@ -86,10 +86,10 @@ struct FlowStoreAnimationTests {
     func animatedEdgesIncrementDashPhase() async throws {
         let store = makeStore()
 
-        // Add an animated edge
-        var animatedEdge = FlowEdge(id: "animated", sourceNodeID: "a", targetNodeID: "c")
-        animatedEdge.isAnimated = true
+        // Add an edge and mark it animated via side-table
+        let animatedEdge = FlowEdge(id: "animated", sourceNodeID: "a", targetNodeID: "c")
         store.addEdge(animatedEdge)
+        store.setEdgeAnimated("animated", true)
 
         let initialPhase = store.edgeDashPhase
 
@@ -126,10 +126,10 @@ struct FlowStoreAnimationTests {
         store.setViewport(Viewport(offset: CGPoint(x: 500, y: 500), zoom: 2.0), animation: .default)
         store.setNodePositions(["a": CGPoint(x: 999, y: 999)], animation: .default)
 
-        // Add animated edge
-        var animatedEdge = FlowEdge(id: "animated", sourceNodeID: "a", targetNodeID: "b")
-        animatedEdge.isAnimated = true
+        // Add edge and mark it animated via side-table
+        let animatedEdge = FlowEdge(id: "animated", sourceNodeID: "a", targetNodeID: "b")
         store.addEdge(animatedEdge)
+        store.setEdgeAnimated("animated", true)
 
         try await Task.sleep(for: .milliseconds(50))
 

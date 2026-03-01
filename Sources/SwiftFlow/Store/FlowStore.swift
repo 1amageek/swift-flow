@@ -11,6 +11,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var viewport: Viewport
     public var selectedNodeIDs: Set<String>
     public var selectedEdgeIDs: Set<String>
+    public private(set) var animatedEdgeIDs: Set<String>
     public private(set) var hoveredNodeID: String?
     public var configuration: FlowConfiguration
 
@@ -35,7 +36,6 @@ public final class FlowStore<Data: Sendable & Hashable> {
     private var nodePositionAnimations: [String: (x: PropertyAnimation, y: PropertyAnimation)] = [:]
     public private(set) var edgeDashPhase: CGFloat = 0
     private var animationTask: Task<Void, Never>?
-    private var hasAnimatedEdges: Bool = false
 
     // MARK: - Undo
 
@@ -63,10 +63,10 @@ public final class FlowStore<Data: Sendable & Hashable> {
         self.viewport = viewport
         self.selectedNodeIDs = []
         self.selectedEdgeIDs = []
+        self.animatedEdgeIDs = []
         self.configuration = configuration
         rebuildNodeLookup()
         rebuildConnectionLookup()
-        updateAnimatedEdgesFlag()
     }
 
     // MARK: - Node Operations
@@ -99,10 +99,10 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
         edges.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
         rebuildConnectionLookup()
-        updateAnimatedEdgesFlag()
 
         for edge in cascadedEdges {
             selectedEdgeIDs.remove(edge.id)
+            animatedEdgeIDs.remove(edge.id)
         }
 
         onNodesChange?([.remove(nodeID: nodeID)])
@@ -233,8 +233,6 @@ public final class FlowStore<Data: Sendable & Hashable> {
         connectionLookup[edge.sourceNodeID, default: []].append(edge)
         connectionLookup[edge.targetNodeID, default: []].append(edge)
         onEdgesChange?([.add(edge)])
-        updateAnimatedEdgesFlag()
-        startAnimationLoopIfNeeded()
         let captured = edge
         registerUndo(actionName: "Add Edge") { store in
             store.removeEdge(captured.id)
@@ -248,9 +246,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
         rebuildConnectionLookup()
 
         selectedEdgeIDs.remove(edgeID)
+        animatedEdgeIDs.remove(edgeID)
 
         onEdgesChange?([.remove(edgeID: edgeID)])
-        updateAnimatedEdgesFlag()
 
         if let capturedEdge {
             registerUndo(actionName: "Remove Edge") { store in
@@ -262,6 +260,94 @@ public final class FlowStore<Data: Sendable & Hashable> {
                 }
             }
         }
+    }
+
+    // MARK: - Edge Update
+
+    /// Update a single edge's structural properties in-place.
+    /// Undo is registered automatically. Topology-related lookups are rebuilt only when necessary.
+    public func updateEdge(_ edgeID: String, _ transform: (inout FlowEdge) -> Void) {
+        guard let index = edges.firstIndex(where: { $0.id == edgeID }) else { return }
+        let old = edges[index]
+        transform(&edges[index])
+        let new = edges[index]
+        guard old != new else { return }
+
+        if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
+            || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID {
+            rebuildConnectionLookup()
+        }
+
+        onEdgesChange?([.replace(new)])
+
+        let capturedOld = old
+        registerUndo(actionName: "Update Edge") { store in
+            store.updateEdge(edgeID) { $0 = capturedOld }
+        }
+    }
+
+    /// Update multiple edges in a single batch. Only triggers one lookup rebuild and one callback.
+    public func updateEdges(_ transform: (inout FlowEdge) -> Void) {
+        var anyTopologyChanged = false
+        var changes: [EdgeChange] = []
+        var oldSnapshots: [(String, FlowEdge)] = []
+        var newSnapshots: [(String, FlowEdge)] = []
+
+        for index in edges.indices {
+            let old = edges[index]
+            transform(&edges[index])
+            let new = edges[index]
+            guard old != new else { continue }
+
+            if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
+                || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID {
+                anyTopologyChanged = true
+            }
+            changes.append(.replace(new))
+            oldSnapshots.append((new.id, old))
+            newSnapshots.append((new.id, new))
+        }
+
+        guard !changes.isEmpty else { return }
+        if anyTopologyChanged { rebuildConnectionLookup() }
+        onEdgesChange?(changes)
+
+        registerBatchEdgeUndo(restoreTo: oldSnapshots, redoTo: newSnapshots)
+    }
+
+    private func registerBatchEdgeUndo(
+        restoreTo: [(String, FlowEdge)],
+        redoTo: [(String, FlowEdge)]
+    ) {
+        registerUndo(actionName: "Update Edges") { store in
+            store.withoutUndoRegistration {
+                for (edgeID, old) in restoreTo {
+                    store.updateEdge(edgeID) { $0 = old }
+                }
+            }
+            store.registerBatchEdgeUndo(restoreTo: redoTo, redoTo: restoreTo)
+        }
+    }
+
+    // MARK: - Edge Animation (side-table, no undo)
+
+    /// Set the animated state for a single edge.
+    /// Animation state is managed separately from edge structure and never participates in undo.
+    public func setEdgeAnimated(_ edgeID: String, _ animated: Bool) {
+        if animated {
+            guard animatedEdgeIDs.insert(edgeID).inserted else { return }
+        } else {
+            guard animatedEdgeIDs.remove(edgeID) != nil else { return }
+        }
+        startAnimationLoopIfNeeded()
+    }
+
+    /// Replace the entire set of animated edges at once.
+    /// This is the most efficient way to synchronize animation state from an external source.
+    public func setAnimatedEdges(_ edgeIDs: Set<String>) {
+        guard animatedEdgeIDs != edgeIDs else { return }
+        animatedEdgeIDs = edgeIDs
+        startAnimationLoopIfNeeded()
     }
 
     // MARK: - Selection
@@ -601,7 +687,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     var isAnimating: Bool {
         viewportAnimations.x != nil || viewportAnimations.y != nil || viewportAnimations.zoom != nil
         || !nodePositionAnimations.isEmpty
-        || hasAnimatedEdges
+        || !animatedEdgeIDs.isEmpty
     }
 
     private func startAnimationLoopIfNeeded() {
@@ -685,16 +771,12 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     private func tickEdgeDashPhase(dt: TimeInterval) {
-        guard hasAnimatedEdges else { return }
+        guard !animatedEdgeIDs.isEmpty else { return }
         edgeDashPhase += CGFloat(dt) * 30
         let patternLength = configuration.edgeStyle.animatedDashPattern.reduce(0, +)
         if patternLength > 0 {
             edgeDashPhase = edgeDashPhase.truncatingRemainder(dividingBy: patternLength)
         }
-    }
-
-    func updateAnimatedEdgesFlag() {
-        hasAnimatedEdges = edges.contains(where: \.isAnimated)
     }
 
     // MARK: - Connection Draft
@@ -981,6 +1063,7 @@ extension FlowStore where Data: Codable {
         self.viewport = document.viewport
         self.selectedNodeIDs = []
         self.selectedEdgeIDs = []
+        self.animatedEdgeIDs = []
         self.hoveredNodeID = nil
         rebuildNodeLookup()
 
@@ -994,7 +1077,6 @@ extension FlowStore where Data: Codable {
         }
 
         rebuildConnectionLookup()
-        updateAnimatedEdgesFlag()
         undoManager?.removeAllActions()
     }
 }

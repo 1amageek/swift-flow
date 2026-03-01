@@ -10,7 +10,6 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
     public var pathType: EdgePathType
     public var isSelected: Bool
     public var label: String?
-    public var isAnimated: Bool
 
     public init(
         id: String,
@@ -20,8 +19,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         targetHandleID: String? = nil,
         pathType: EdgePathType = .bezier,
         isSelected: Bool = false,
-        label: String? = nil,
-        isAnimated: Bool = false
+        label: String? = nil
     ) {
         self.id = id
         self.sourceNodeID = sourceNodeID
@@ -31,6 +29,5 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         self.pathType = pathType
         self.isSelected = isSelected
         self.label = label
-        self.isAnimated = isAnimated
     }
 }

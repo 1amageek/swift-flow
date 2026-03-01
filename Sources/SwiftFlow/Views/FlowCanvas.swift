@@ -411,7 +411,7 @@ public struct FlowCanvas<
 
             if edge.isSelected {
                 selectedPath.addPath(transformed)
-            } else if edge.isAnimated {
+            } else if store.animatedEdgeIDs.contains(edge.id) {
                 animatedPath.addPath(transformed)
             } else {
                 normalPath.addPath(transformed)
@@ -1102,8 +1102,8 @@ private struct PreviewNode: View {
             ],
             edges: [
                 // Entry (animated to show dash phase)
-                FlowEdge(id: "e01", sourceNodeID: "webhook", sourceHandleID: "out", targetNodeID: "auth",     targetHandleID: "in", isAnimated: true),
-                FlowEdge(id: "e02", sourceNodeID: "auth",    sourceHandleID: "out", targetNodeID: "router",   targetHandleID: "in", isAnimated: true),
+                FlowEdge(id: "e01", sourceNodeID: "webhook", sourceHandleID: "out", targetNodeID: "auth",     targetHandleID: "in"),
+                FlowEdge(id: "e02", sourceNodeID: "auth",    sourceHandleID: "out", targetNodeID: "router",   targetHandleID: "in"),
                 // Fan-out from router
                 FlowEdge(id: "e03", sourceNodeID: "router",  sourceHandleID: "out", targetNodeID: "parse",    targetHandleID: "in", label: "JSON"),
                 FlowEdge(id: "e04", sourceNodeID: "router",  sourceHandleID: "out", targetNodeID: "validate", targetHandleID: "in"),
@@ -1128,6 +1128,8 @@ private struct PreviewNode: View {
                 backgroundStyle: BackgroundStyle(pattern: .dot)
             )
         )
+        // Animate entry edges to show dash phase
+        store.setAnimatedEdges(["e01", "e02"])
         store.onConnect = { [weak store] proposal in
             guard let store else { return }
             let edge = FlowEdge(

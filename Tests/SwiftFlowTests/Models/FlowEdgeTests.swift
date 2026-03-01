@@ -16,7 +16,6 @@ struct FlowEdgeTests {
         #expect(edge.pathType == .bezier)
         #expect(edge.isSelected == false)
         #expect(edge.label == nil)
-        #expect(edge.isAnimated == false)
     }
 
     @Test("Codable round-trip")
@@ -29,8 +28,7 @@ struct FlowEdgeTests {
             targetHandleID: "in",
             pathType: .smoothStep,
             isSelected: true,
-            label: "Label",
-            isAnimated: true
+            label: "Label"
         )
         let encoder = JSONEncoder()
         let data = try encoder.encode(edge)

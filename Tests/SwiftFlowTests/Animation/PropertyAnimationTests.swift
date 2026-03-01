@@ -122,4 +122,23 @@ struct PropertyAnimationTests {
         #expect(anim.settled)
         #expect(anim.current == 100)
     }
+
+    @Test("Large dt does not diverge spring to NaN")
+    func largeDtDoesNotDiverge() {
+        var anim = PropertyAnimation(from: 1.0, to: 2.0, timing: .spring(response: 0.5, dampingFraction: 1.0))
+
+        // Simulate a huge time step (e.g., app returning from background).
+        // dt is internally clamped, so the spring should remain finite.
+        anim.tick(dt: 5.0)
+        #expect(anim.current.isFinite)
+        #expect(anim.velocity.isFinite)
+
+        // After enough ticks it should settle at the target
+        for _ in 0..<2000 {
+            if anim.settled { break }
+            anim.tick(dt: 1.0 / 120.0)
+        }
+        #expect(anim.settled)
+        #expect(anim.current == 2.0)
+    }
 }

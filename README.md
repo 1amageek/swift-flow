@@ -120,10 +120,11 @@ FlowEdge(
     targetNodeID: "node-2",
     targetHandleID: "in",         // matches HandleDeclaration.id on target node
     pathType: .bezier,            // .bezier | .straight | .smoothStep | .simpleBezier
-    label: "Yes",                 // optional label displayed on the edge
-    isAnimated: false             // animated dash pattern
+    label: "Yes"                  // optional label displayed on the edge
 )
 ```
+
+Edge animation is managed separately via the store's `animatedEdgeIDs` side-table — see [Edge Animation](#edge-animation).
 
 ### FlowCanvas
 
@@ -337,7 +338,7 @@ FlowConfiguration(
         lineWidth: 1.5,               // normal width
         selectedLineWidth: 2.5,       // selected width
         dashPattern: [],              // empty = solid line, e.g. [5, 3]
-        animatedDashPattern: [5, 5]   // pattern for isAnimated edges
+        animatedDashPattern: [5, 5]   // pattern for edges in animatedEdgeIDs
     ),
     backgroundStyle: BackgroundStyle(
         pattern: .grid,                // .none | .grid | .dot
@@ -374,6 +375,13 @@ store.updateNodeSize("node-1", size: size)  // resize node
 ```swift
 store.addEdge(edge)                     // add an edge (rejects duplicate IDs and dangling node references)
 store.removeEdge("edge-1")              // remove an edge
+store.updateEdge("edge-1") { edge in   // update structural properties (registers undo)
+    edge.pathType = .smoothStep
+    edge.label = "Updated"
+}
+store.updateEdges(["e1", "e2"]) { edge in  // batch update (single undo entry)
+    edge.pathType = .straight
+}
 ```
 
 ### Selection
@@ -387,6 +395,20 @@ store.deselectEdge("edge-1")
 store.clearSelection()
 ```
 
+### Edge Animation
+
+Animation state is managed as a store-level side-table (`animatedEdgeIDs`), separate from the `FlowEdge` struct. This follows the same pattern as `selectedEdgeIDs` — transient view state lives in the store, not on the model. Animated edges render with a moving dash pattern.
+
+```swift
+store.setEdgeAnimated("edge-1", true)       // mark a single edge as animated
+store.setEdgeAnimated("edge-1", false)      // stop animating a single edge
+store.setAnimatedEdges(["e1", "e2"])        // replace the full animated set
+store.setAnimatedEdges([])                  // stop all edge animations
+store.animatedEdgeIDs                       // read current animated edge IDs
+```
+
+Animation state does not participate in undo/redo and is cleared on `load()`.
+
 ### Viewport
 
 ```swift
@@ -397,7 +419,7 @@ store.fitToContent(canvasSize: size)           // fit all nodes in view
 
 ### Undo / Redo
 
-Assign an `UndoManager` to enable undo/redo for node add/remove, edge add/remove, node move, and selection deletion:
+Assign an `UndoManager` to enable undo/redo for node add/remove, edge add/remove/update, node move, and selection deletion:
 
 ```swift
 store.undoManager = undoManager
@@ -412,6 +434,7 @@ store.nodeLookup["node-1"]              // O(1) node access by id
 store.connectionLookup["node-1"]        // O(1) edges for a node
 store.selectedNodeIDs                   // currently selected node IDs
 store.selectedEdgeIDs                   // currently selected edge IDs
+store.animatedEdgeIDs                   // currently animated edge IDs
 store.hoveredNodeID                     // currently hovered node ID (nil if none)
 ```
 
@@ -461,6 +484,8 @@ store.load(document)
 │  ├─ nodes: [FlowNode<Data>]                │
 │  ├─ edges: [FlowEdge]                      │
 │  ├─ viewport: Viewport                      │
+│  ├─ selectedNodeIDs / selectedEdgeIDs      │
+│  ├─ animatedEdgeIDs (side-table)           │
 │  ├─ nodeLookup / connectionLookup (O(1))   │
 │  └─ hit testing, connection workflow        │
 ├─────────────────────────────────────────────┤

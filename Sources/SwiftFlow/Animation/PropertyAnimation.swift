@@ -87,7 +87,10 @@ struct PropertyAnimation {
     // MARK: - Spring (Semi-implicit Euler)
 
     private mutating func tickSpring(dt: TimeInterval, response: CGFloat, dampingFraction: CGFloat) {
-        let dt = CGFloat(dt)
+        // Clamp dt to prevent Euler integration divergence when the main
+        // thread stalls or the app returns from background.
+        // Max stable dt ≈ 2/omega; clamping to 1/30 is well within bounds.
+        let dt = min(CGFloat(dt), 1.0 / 30.0)
         guard response > 0 else {
             current = target
             velocity = 0
@@ -102,6 +105,14 @@ struct PropertyAnimation {
         let acceleration = -omega * omega * displacement - 2 * zeta * omega * velocity
         velocity += acceleration * dt
         current += velocity * dt
+
+        // Snap to target if the spring diverged (NaN / infinity)
+        guard current.isFinite && velocity.isFinite else {
+            current = target
+            velocity = 0
+            settled = true
+            return
+        }
 
         // Settle detection — threshold must be small enough for zoom values (~0.1–4.0)
         if abs(current - target) < 0.1 && abs(velocity) < 0.1 {

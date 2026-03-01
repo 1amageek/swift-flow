@@ -711,8 +711,11 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     private func tickAnimations(dt: TimeInterval) {
-        tickViewportAnimations(dt: dt)
-        tickNodePositionAnimations(dt: dt)
+        // Clamp dt to prevent numerical instability in spring integration
+        // when the main thread stalls or the app returns from background.
+        let clampedDT = min(dt, 1.0 / 30.0)
+        tickViewportAnimations(dt: clampedDT)
+        tickNodePositionAnimations(dt: clampedDT)
         tickEdgeDashPhase(dt: dt)
     }
 
@@ -732,7 +735,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
             viewport.zoom = anim.current
 
             // Derive offset from zoom to keep anchor stable
-            if let anchor = zoomAnchorState {
+            if let anchor = zoomAnchorState, anchor.initialZoom > 0 {
                 let scale = anim.current / anchor.initialZoom
                 viewport.offset.x = anchor.anchor.x - (anchor.anchor.x - anchor.initialOffset.x) * scale
                 viewport.offset.y = anchor.anchor.y - (anchor.anchor.y - anchor.initialOffset.y) * scale

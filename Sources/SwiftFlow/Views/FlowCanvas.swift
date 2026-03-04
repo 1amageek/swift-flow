@@ -168,7 +168,9 @@ public struct FlowCanvas<
             }
         }
         .gesture(primaryDragGesture)
+        #if os(iOS)
         .gesture(magnifyGesture)
+        #endif
         .gesture(
             SpatialTapGesture()
                 .modifiers(.command)
@@ -305,19 +307,62 @@ public struct FlowCanvas<
         guard style.pattern != .none else { return }
 
         let viewport = store.viewport
-        let spacing = style.spacing * viewport.zoom
 
-        // Avoid drawing when spacing is too small to be visible
-        guard spacing > 2 else { return }
+        // Multi-scale background: when zoomed out, step up to a coarser spacing
+        // so the pattern stays visible at every zoom level.
+        let minScreenSpacing: CGFloat = 10
+        let scaleStep: CGFloat = 5
 
-        // Calculate visible canvas range and snap to grid lines
+        // Find the coarsest level whose screen spacing >= minScreenSpacing
+        var levelSpacing = style.spacing
+        while levelSpacing * viewport.zoom < minScreenSpacing {
+            levelSpacing *= scaleStep
+        }
+
+        // Draw two levels: coarse (major) then fine, with crossfade.
+        // The coarse level is always fully opaque when visible.
+        let coarseSpacing = levelSpacing * scaleStep
+        let coarseScreenSpacing = coarseSpacing * viewport.zoom
+        if coarseScreenSpacing >= minScreenSpacing {
+            drawBackgroundPattern(
+                context: &context, canvasSize: canvasSize,
+                style: style, viewport: viewport,
+                spacing: coarseSpacing, alpha: 1.0
+            )
+        }
+
+        // Fine level fades in as its screen spacing grows away from the threshold
+        let fineScreenSpacing = levelSpacing * viewport.zoom
+        let fadeMin: CGFloat = minScreenSpacing
+        let fadeMax: CGFloat = minScreenSpacing * 1.5
+        let t = min(1.0, max(0.0, (fineScreenSpacing - fadeMin) / (fadeMax - fadeMin)))
+        let fineAlpha = 0.4 + 0.6 * t
+        if fineAlpha > 0.01 {
+            drawBackgroundPattern(
+                context: &context, canvasSize: canvasSize,
+                style: style, viewport: viewport,
+                spacing: levelSpacing, alpha: fineAlpha
+            )
+        }
+    }
+
+    private func drawBackgroundPattern(
+        context: inout GraphicsContext,
+        canvasSize: CGSize,
+        style: BackgroundStyle,
+        viewport: Viewport,
+        spacing: CGFloat,
+        alpha: CGFloat
+    ) {
         let topLeft = viewport.screenToCanvas(.zero)
         let bottomRight = viewport.screenToCanvas(CGPoint(x: canvasSize.width, y: canvasSize.height))
 
-        let startX = (topLeft.x / style.spacing).rounded(.down) * style.spacing
-        let startY = (topLeft.y / style.spacing).rounded(.down) * style.spacing
-        let endX = (bottomRight.x / style.spacing).rounded(.up) * style.spacing
-        let endY = (bottomRight.y / style.spacing).rounded(.up) * style.spacing
+        let startX = (topLeft.x / spacing).rounded(.down) * spacing
+        let startY = (topLeft.y / spacing).rounded(.down) * spacing
+        let endX = (bottomRight.x / spacing).rounded(.up) * spacing
+        let endY = (bottomRight.y / spacing).rounded(.up) * spacing
+
+        let color = style.color.opacity(alpha)
 
         switch style.pattern {
         case .none:
@@ -326,32 +371,31 @@ public struct FlowCanvas<
         case .grid:
             var gridPath = Path()
 
-            // Vertical lines
             var x = startX
             while x <= endX {
                 let screenX = x * viewport.zoom + viewport.offset.x
                 gridPath.move(to: CGPoint(x: screenX, y: 0))
                 gridPath.addLine(to: CGPoint(x: screenX, y: canvasSize.height))
-                x += style.spacing
+                x += spacing
             }
 
-            // Horizontal lines
             var y = startY
             while y <= endY {
                 let screenY = y * viewport.zoom + viewport.offset.y
                 gridPath.move(to: CGPoint(x: 0, y: screenY))
                 gridPath.addLine(to: CGPoint(x: canvasSize.width, y: screenY))
-                y += style.spacing
+                y += spacing
             }
 
             context.stroke(
                 gridPath,
-                with: .color(style.color),
+                with: .color(color),
                 style: StrokeStyle(lineWidth: style.lineWidth)
             )
 
         case .dot:
             var dotPath = Path()
+            let radius = style.dotRadius
 
             var x = startX
             while x <= endX {
@@ -360,17 +404,17 @@ public struct FlowCanvas<
                     let screenX = x * viewport.zoom + viewport.offset.x
                     let screenY = y * viewport.zoom + viewport.offset.y
                     dotPath.addEllipse(in: CGRect(
-                        x: screenX - style.dotRadius,
-                        y: screenY - style.dotRadius,
-                        width: style.dotRadius * 2,
-                        height: style.dotRadius * 2
+                        x: screenX - radius,
+                        y: screenY - radius,
+                        width: radius * 2,
+                        height: radius * 2
                     ))
-                    y += style.spacing
+                    y += spacing
                 }
-                x += style.spacing
+                x += spacing
             }
 
-            context.fill(dotPath, with: .color(style.color))
+            context.fill(dotPath, with: .color(color))
         }
     }
 

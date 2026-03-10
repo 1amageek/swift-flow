@@ -367,6 +367,9 @@ FlowConfiguration(
 store.addNode(node)                     // add a node
 store.removeNode("node-1")              // remove node and its connected edges
 store.moveNode("node-1", to: point)     // move node (respects snapToGrid)
+store.updateNode("node-1") { node in   // update any node property in-place
+    node.data.badge = "New"
+}
 store.updateNodeSize("node-1", size: size)  // resize node
 ```
 
@@ -393,6 +396,15 @@ store.deselectNode("node-1")
 store.selectEdge("edge-1")
 store.deselectEdge("edge-1")
 store.clearSelection()
+```
+
+### Drop Target State
+
+```swift
+store.dropTargetNodeID                  // currently highlighted drop target node (nil if none)
+store.dropTargetEdgeID                  // currently highlighted drop target edge (nil if none)
+store.setDropTargetNode("node-1")       // manually set drop target (usually managed by dropDestination)
+store.setDropTargetEdge("edge-1")       // manually set drop target edge
 ```
 
 ### Edge Animation
@@ -436,6 +448,8 @@ store.selectedNodeIDs                   // currently selected node IDs
 store.selectedEdgeIDs                   // currently selected edge IDs
 store.animatedEdgeIDs                   // currently animated edge IDs
 store.hoveredNodeID                     // currently hovered node ID (nil if none)
+store.dropTargetNodeID                  // currently highlighted drop target node
+store.dropTargetEdgeID                  // currently highlighted drop target edge
 ```
 
 ## Serialization
@@ -454,6 +468,132 @@ store.load(document)
 
 `FlowDocument` contains nodes, edges, and viewport state. Selection state is cleared on export.
 
+## Drop Destination
+
+Enable drag-and-drop onto the canvas, nodes, and edges using the `dropDestination(for:action:)` modifier.
+
+```swift
+FlowCanvas(store: store) { node in
+    MyNodeView(node: node)
+}
+.dropDestination(for: [.json]) { phase in
+    switch phase {
+    case .updated(let providers, let location, let target):
+        // Called continuously during drag hover.
+        // `target` tells you what's under the cursor:
+        //   .canvas        — empty area
+        //   .node(nodeID)  — over a node
+        //   .edge(edgeID)  — over an edge
+        // Return true to accept (highlights the target), false to reject.
+        return true
+
+    case .performed(let providers, let location, let target):
+        // Drop occurred. Decode providers and act based on target.
+        for provider in providers {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.json.identifier) { data, error in
+                guard let data else { return }
+                // decode and handle...
+            }
+        }
+        return true
+
+    case .exited:
+        return false
+    }
+}
+```
+
+### DropPhase
+
+| Case | Parameters | Description |
+|---|---|---|
+| `.updated` | `[NSItemProvider], CGPoint, DropTarget` | Drag hovering — return `true` to highlight target |
+| `.performed` | `[NSItemProvider], CGPoint, DropTarget` | Drop completed — decode and apply |
+| `.exited` | — | Drag left the canvas |
+
+### DropTarget
+
+| Case | Value | Description |
+|---|---|---|
+| `.node` | `String` (node ID) | Cursor is over a node |
+| `.edge` | `String` (edge ID) | Cursor is over an edge |
+| `.canvas` | — | Cursor is over the background |
+
+### Drop Target Visual Feedback
+
+Nodes and edges have an `isDropTarget: Bool` property that the library manages automatically based on the `Bool` you return from `.updated`. Use this in custom node views:
+
+```swift
+FlowCanvas(store: store) { node in
+    RoundedRectangle(cornerRadius: 8)
+        .fill(node.isDropTarget ? Color.accentColor.opacity(0.1) : Color(.systemBackground))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(node.isDropTarget ? Color.accentColor : .gray, lineWidth: node.isDropTarget ? 2 : 0.5)
+        }
+        .scaleEffect(node.isDropTarget ? 1.04 : 1.0)
+        .animation(.spring(duration: 0.2), value: node.isDropTarget)
+}
+```
+
+Drop-target edges are drawn with an accent-colored stroke automatically by the built-in edge renderer. The store also exposes `dropTargetNodeID` and `dropTargetEdgeID` for reading the current target.
+
+## Accessory Views
+
+Attach floating views near selected nodes or edges. Accessory views appear/disappear with animation when selection changes.
+
+### Node Accessory
+
+```swift
+FlowCanvas(store: store) { node in
+    MyNodeView(node: node)
+}
+.nodeAccessory { node in
+    VStack {
+        Text(node.data.title).font(.headline)
+        Button("Delete") { store.removeNode(node.id) }
+    }
+    .padding(8)
+    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+}
+```
+
+With per-node placement:
+
+```swift
+.nodeAccessory(placement: { node in
+    node.data.category == "trigger" ? .bottom : .top
+}) { node in
+    MyAccessoryView(node: node)
+}
+```
+
+### Edge Accessory
+
+```swift
+.edgeAccessory { edge in
+    HStack {
+        Text(edge.label ?? "Edge")
+        Button(role: .destructive) { store.removeEdge(edge.id) } label: {
+            Image(systemName: "xmark.circle.fill")
+        }
+    }
+    .padding(6)
+    .background(.regularMaterial, in: Capsule())
+}
+```
+
+### Placement Options
+
+| `AccessoryPlacement` | Description |
+|---|---|
+| `.top` | Above the node/edge midpoint (default) |
+| `.bottom` | Below |
+| `.leading` | Left side |
+| `.trailing` | Right side |
+
+The library flips placement automatically when the accessory would be clipped by the canvas edge.
+
 ## Interaction Reference
 
 | Action | macOS | iOS |
@@ -468,6 +608,7 @@ store.load(document)
 | Multi-select (rect) | Shift + drag rectangle | Long press + drag |
 | Hover | Mouse over node | Pointer hover |
 | Cursor feedback | Contextual (hand/crosshair/arrow) | N/A |
+| Drop onto canvas | Drag external item onto canvas | Drag external item onto canvas |
 
 ## Architecture
 

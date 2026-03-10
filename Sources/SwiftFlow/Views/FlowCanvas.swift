@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct FlowCanvas<
     NodeData: Sendable & Hashable,
@@ -16,6 +17,8 @@ public struct FlowCanvas<
     private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
     private var accessoryAnimation: Animation? = .spring(duration: 0.25, bounce: 0.05)
+    private var registeredDropTypes: [String] = []
+    private var dropHandler: (@MainActor @Sendable (_ event: CanvasDropEvent) -> Bool)? = nil
 
     // MARK: - Init: Default
 
@@ -120,6 +123,77 @@ public struct FlowCanvas<
         copy.edgeAccessoryBuilder = { edge in AnyView(content(edge)) }
         copy.edgeAccessoryPlacement = placement
         copy.accessoryAnimation = animation
+        return copy
+    }
+
+    // MARK: - Drop Destination
+
+    /// Configures the canvas as a drop destination.
+    ///
+    /// - Parameters:
+    ///   - types: The UTType identifiers the canvas should accept. On macOS these are
+    ///     passed to `registerForDraggedTypes`. Custom UTTypes (declared with `exportedAs`)
+    ///     must be listed here explicitly.
+    ///   - action: Called for each drag phase. Return `true` to accept the drop target
+    ///     (the library highlights the node/edge with `isDropTarget = true`), `false` to reject.
+    ///     For `.exited`, the return value is ignored.
+    @discardableResult
+    public func dropDestination(
+        for types: [UTType],
+        action: @escaping (_ phase: DropPhase) -> Bool
+    ) -> FlowCanvas {
+        var copy = self
+        copy.registeredDropTypes = types.map(\.identifier)
+        let storeRef = self.store
+        copy.dropHandler = { event in
+            switch event {
+            case .updated(let providers, let screenLocation):
+                let canvasPoint = storeRef.viewport.screenToCanvas(screenLocation)
+                let nodeID = storeRef.hitTestNode(at: canvasPoint)
+                let edgeID = nodeID == nil ? storeRef.hitTestEdge(at: canvasPoint) : nil
+
+                let target: DropTarget
+                if let nodeID {
+                    target = .node(nodeID)
+                } else if let edgeID {
+                    target = .edge(edgeID)
+                } else {
+                    target = .canvas
+                }
+
+                storeRef.setHoveredNode(nodeID)
+
+                let accepted = action(.updated(providers, canvasPoint, target))
+                storeRef.setDropTargetNode(accepted ? nodeID : nil)
+                storeRef.setDropTargetEdge(accepted ? edgeID : nil)
+                return accepted
+
+            case .exited:
+                storeRef.setHoveredNode(nil)
+                storeRef.setDropTargetNode(nil)
+                storeRef.setDropTargetEdge(nil)
+                _ = action(.exited)
+                return false
+
+            case .performed(let providers, let screenLocation):
+                let canvasPoint = storeRef.viewport.screenToCanvas(screenLocation)
+                let nodeID = storeRef.hitTestNode(at: canvasPoint)
+                let edgeID = nodeID == nil ? storeRef.hitTestEdge(at: canvasPoint) : nil
+
+                let target: DropTarget
+                if let nodeID {
+                    target = .node(nodeID)
+                } else if let edgeID {
+                    target = .edge(edgeID)
+                } else {
+                    target = .canvas
+                }
+
+                storeRef.setDropTargetNode(nil)
+                storeRef.setDropTargetEdge(nil)
+                return action(.performed(providers, canvasPoint, target))
+            }
+        }
         return copy
     }
 
@@ -239,7 +313,9 @@ public struct FlowCanvas<
             },
             onMouseExited: {
                 store.setHoveredNode(nil)
-            }
+            },
+            registeredDropTypes: registeredDropTypes,
+            onDrop: dropHandler
         ) {
             canvasView
         }
@@ -265,7 +341,9 @@ public struct FlowCanvas<
             onPan: { delta in
                 guard store.configuration.panEnabled else { return }
                 store.pan(by: delta)
-            }
+            },
+            registeredDropTypes: registeredDropTypes,
+            onDrop: dropHandler
         ) {
             canvasView
         }
@@ -427,6 +505,7 @@ public struct FlowCanvas<
         var normalPath = Path()
         var selectedPath = Path()
         var animatedPath = Path()
+        var dropTargetPath = Path()
         var labelsToDraw: [(String, CGPoint)] = []
 
         for edge in store.edges {
@@ -453,7 +532,9 @@ public struct FlowCanvas<
 
             let transformed = transformedPath(edgePath.path, viewport: viewport)
 
-            if edge.isSelected {
+            if edge.isDropTarget {
+                dropTargetPath.addPath(transformed)
+            } else if edge.isSelected {
                 selectedPath.addPath(transformed)
             } else if store.animatedEdgeIDs.contains(edge.id) {
                 animatedPath.addPath(transformed)
@@ -479,6 +560,10 @@ public struct FlowCanvas<
         if !selectedPath.isEmpty {
             let strokeStyle = StrokeStyle(lineWidth: style.selectedLineWidth)
             context.stroke(selectedPath, with: .color(style.selectedStrokeColor), style: strokeStyle)
+        }
+        if !dropTargetPath.isEmpty {
+            let strokeStyle = StrokeStyle(lineWidth: style.selectedLineWidth + 1)
+            context.stroke(dropTargetPath, with: .color(.accentColor), style: strokeStyle)
         }
 
         // Edge labels (with background for readability)
@@ -903,12 +988,34 @@ private enum DragCursorKind: Equatable {
 
 // MARK: - Preview
 
-private struct PreviewNodeData: Sendable, Hashable {
+/// Data model for preview nodes.
+private struct PreviewNodeData: Sendable, Hashable, Codable {
     let title: String
     let category: String
     let icon: String
     var badge: String?
     var subtitle: String?
+}
+
+/// Unified draggable payload. Uses `public.json` (a well-known system UTType)
+/// so that the pasteboard, registerForDraggedTypes, and NSItemProvider all
+/// work without custom UTType registration in Info.plist.
+/// The `kind` field discriminates the three item categories.
+private struct DragPayload: Sendable, Hashable, Codable, Transferable {
+    enum Kind: String, Codable {
+        case nodeTemplate
+        case nodeAttribute
+        case edgeAttribute
+    }
+
+    let kind: Kind
+    let title: String
+    let subtitle: String?
+    let icon: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .json)
+    }
 }
 
 private struct PreviewNode: View {
@@ -936,25 +1043,29 @@ private struct PreviewNode: View {
 
     private var card: some View {
         RoundedRectangle(cornerRadius: 10)
-            .fill(.background)
+            .fill(node.isDropTarget ? AnyShapeStyle(Color.accentColor.opacity(0.08)) : AnyShapeStyle(.background))
             .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
             .shadow(
-                color: node.isSelected ? Color.accentColor.opacity(0.4)
+                color: node.isDropTarget ? Color.accentColor.opacity(0.5)
+                     : node.isSelected ? Color.accentColor.opacity(0.4)
                      : node.isHovered ? .black.opacity(0.14)
                      : .black.opacity(0.08),
-                radius: node.isSelected ? 8 : node.isHovered ? 5 : 3,
-                y: node.isSelected ? 0 : node.isHovered ? 1 : 2
+                radius: node.isDropTarget ? 10 : node.isSelected ? 8 : node.isHovered ? 5 : 3,
+                y: node.isDropTarget ? 0 : node.isSelected ? 0 : node.isHovered ? 1 : 2
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
                     .strokeBorder(
-                        node.isSelected ? Color.accentColor
+                        node.isDropTarget ? Color.accentColor
+                          : node.isSelected ? Color.accentColor
                           : node.isHovered ? Color.primary.opacity(0.25)
                           : Color.primary.opacity(0.1),
-                        lineWidth: node.isSelected ? 1.5 : node.isHovered ? 0.75 : 0.5
+                        lineWidth: node.isDropTarget ? 2.0 : node.isSelected ? 1.5 : node.isHovered ? 0.75 : 0.5
                     )
             }
             .overlay(alignment: .leading) { cardContent }
+            .scaleEffect(node.isDropTarget ? 1.04 : 1.0)
+            .animation(.spring(duration: 0.2), value: node.isDropTarget)
     }
 
     @ViewBuilder
@@ -1188,7 +1299,7 @@ private struct PreviewNode: View {
         return store
     }()
     GeometryReader { geometry in
-        ZStack(alignment: .bottomTrailing) {
+        ZStack {
             FlowCanvas(store: store) { node in
                 PreviewNode(node)
             }
@@ -1248,12 +1359,81 @@ private struct PreviewNode: View {
                 .background(.regularMaterial, in: Capsule())
                 .shadow(color: .black.opacity(0.12), radius: 6, y: 3)
             }
+            .dropDestination(for: [.json]) { phase in
+                switch phase {
+                case .updated(_, _, let target):
+                    // All items use .json — accept all targets during hover.
+                    // Kind-based filtering happens on performed.
+                    switch target {
+                    case .canvas, .node, .edge:
+                        return true
+                    }
+
+                case .performed(let providers, let location, let target):
+                    let jsonType = UTType.json.identifier
+                    for provider in providers {
+                        provider.loadDataRepresentation(forTypeIdentifier: jsonType) { data, error in
+                            guard let data else { return }
+                            let payload: DragPayload
+                            do {
+                                payload = try JSONDecoder().decode(DragPayload.self, from: data)
+                            } catch {
+                                return
+                            }
+                            Task { @MainActor in
+                                switch (payload.kind, target) {
+                                case (.nodeTemplate, .canvas):
+                                    let id = "new-\(UUID().uuidString.prefix(8))"
+                                    let node = FlowNode(
+                                        id: id,
+                                        position: location,
+                                        size: CGSize(width: 160, height: 50),
+                                        data: PreviewNodeData(
+                                            title: payload.title,
+                                            category: payload.subtitle ?? "Default",
+                                            icon: payload.icon
+                                        ),
+                                        handles: [
+                                            HandleDeclaration(id: "in", type: .target, position: .left),
+                                            HandleDeclaration(id: "out", type: .source, position: .right),
+                                        ]
+                                    )
+                                    store.addNode(node)
+
+                                case (.nodeAttribute, .node(let nodeID)):
+                                    store.updateNode(nodeID) { node in
+                                        node.data.badge = payload.title
+                                        node.data.subtitle = payload.subtitle
+                                    }
+
+                                case (.edgeAttribute, .edge(let edgeID)):
+                                    store.updateEdge(edgeID) { edge in
+                                        edge.label = payload.title
+                                    }
+
+                                default:
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    return true
+
+                case .exited:
+                    return false
+                }
+            }
+
+            DragPalette()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(12)
 
             VStack(alignment: .trailing, spacing: 8) {
                 MiniMap(store: store, canvasSize: geometry.size)
 
                 AnimationToolbar(store: store, canvasSize: geometry.size)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             .padding(12)
         }
         .onAppear {
@@ -1329,5 +1509,102 @@ private struct AnimationToolbar: View {
         .controlSize(.small)
         .padding(8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct DragPalette: View {
+
+    static let nodeTemplates: [DragPayload] = [
+        DragPayload(kind: .nodeTemplate, title: "HTTP", subtitle: "Trigger", icon: "globe"),
+        DragPayload(kind: .nodeTemplate, title: "Filter", subtitle: "Logic", icon: "line.3.horizontal.decrease"),
+        DragPayload(kind: .nodeTemplate, title: "Map", subtitle: "Transform", icon: "arrow.left.arrow.right"),
+        DragPayload(kind: .nodeTemplate, title: "Storage", subtitle: "Storage", icon: "cylinder"),
+    ]
+
+    static let nodeAttributes: [DragPayload] = [
+        DragPayload(kind: .nodeAttribute, title: "Auth", subtitle: "Bearer Token", icon: "lock.shield"),
+        DragPayload(kind: .nodeAttribute, title: "Cache", subtitle: "TTL 60s", icon: "clock.arrow.circlepath"),
+        DragPayload(kind: .nodeAttribute, title: "Retry", subtitle: "Max 3", icon: "arrow.counterclockwise"),
+    ]
+
+    static let edgeAttributes: [DragPayload] = [
+        DragPayload(kind: .edgeAttribute, title: "Success", subtitle: "solid", icon: "checkmark.circle"),
+        DragPayload(kind: .edgeAttribute, title: "Error", subtitle: "dashed", icon: "xmark.circle"),
+        DragPayload(kind: .edgeAttribute, title: "Async", subtitle: "animated", icon: "arrow.triangle.swap"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            paletteSection(title: "Nodes", color: .blue) {
+                ForEach(Self.nodeTemplates, id: \.title) { item in
+                    paletteDragRow(icon: item.icon, label: item.title, color: .blue)
+                        .draggable(item) { dragPreview(icon: item.icon, label: item.title, color: .blue) }
+                }
+            }
+
+            paletteSection(title: "Node Attrs", color: .orange) {
+                ForEach(Self.nodeAttributes, id: \.title) { item in
+                    paletteDragRow(icon: item.icon, label: item.title, color: .orange)
+                        .draggable(item) { dragPreview(icon: item.icon, label: item.title, color: .orange) }
+                }
+            }
+
+            paletteSection(title: "Edge Attrs", color: .green) {
+                ForEach(Self.edgeAttributes, id: \.title) { item in
+                    paletteDragRow(icon: item.icon, label: item.title, color: .green)
+                        .draggable(item) { dragPreview(icon: item.icon, label: item.title, color: .green) }
+                }
+            }
+        }
+        .padding(8)
+        .frame(width: 130)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func paletteSection<Content: View>(
+        title: String,
+        color: Color,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Circle().fill(color).frame(width: 6, height: 6)
+                Text(title)
+                    .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
+            }
+            content()
+        }
+    }
+
+    private func paletteDragRow(icon: String, label: String, color: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: 16)
+            Text(label)
+                .font(.caption)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func dragPreview(icon: String, label: String, color: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(color)
+                .frame(width: 16)
+            Text(label)
+                .font(.caption)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
     }
 }

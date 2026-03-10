@@ -8,6 +8,7 @@ public struct FlowNode<Data: Sendable & Hashable>: Identifiable, Sendable, Hasha
     public var data: Data
     public var isSelected: Bool
     public var isHovered: Bool
+    public var isDropTarget: Bool
     public var isDraggable: Bool
     public var zIndex: Int
     public var handles: [HandleDeclaration]
@@ -31,6 +32,7 @@ public struct FlowNode<Data: Sendable & Hashable>: Identifiable, Sendable, Hasha
         self.data = data
         self.isSelected = isSelected
         self.isHovered = false
+        self.isDropTarget = false
         self.isDraggable = isDraggable
         self.zIndex = zIndex
         self.handles = handles
@@ -55,6 +57,7 @@ extension FlowNode: Codable where Data: Codable {
         data = try container.decode(Data.self, forKey: .data)
         isSelected = try container.decodeIfPresent(Bool.self, forKey: .isSelected) ?? false
         isHovered = false
+        isDropTarget = false
         isDraggable = try container.decodeIfPresent(Bool.self, forKey: .isDraggable) ?? true
         zIndex = try container.decodeIfPresent(Int.self, forKey: .zIndex) ?? 0
         handles = try container.decodeIfPresent([HandleDeclaration].self, forKey: .handles) ?? [

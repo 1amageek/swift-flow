@@ -1,5 +1,16 @@
+import Foundation
+
+/// Internal drop event used between CanvasHostView and FlowCanvas.
+/// Contains raw screen-coordinate data before hit testing.
+enum CanvasDropEvent {
+    case updated([NSItemProvider], CGPoint)
+    case exited
+    case performed([NSItemProvider], CGPoint)
+}
+
 #if os(macOS)
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CanvasHostView<Content: View>: NSViewRepresentable {
 
@@ -7,6 +18,8 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
     let onMagnify: @MainActor (CGFloat, CGPoint) -> Void
     let cursorAt: @MainActor (CGPoint) -> NSCursor
     let onMouseExited: @MainActor () -> Void
+    var registeredDropTypes: [String] = []
+    var onDrop: (@MainActor (CanvasDropEvent) -> Bool)? = nil
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> CanvasNSHostView<Content> {
@@ -15,6 +28,8 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
         hostView.onMagnify = onMagnify
         hostView.cursorAt = cursorAt
         hostView.onMouseExited = onMouseExited
+        hostView.onDrop = onDrop
+        hostView.updateRegisteredTypes(registeredDropTypes)
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hostView.addSubview(hosting)
@@ -33,6 +48,8 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
         nsView.onMagnify = onMagnify
         nsView.cursorAt = cursorAt
         nsView.onMouseExited = onMouseExited
+        nsView.onDrop = onDrop
+        nsView.updateRegisteredTypes(registeredDropTypes)
         nsView.hostingView?.rootView = content
     }
 }
@@ -44,6 +61,21 @@ final class CanvasNSHostView<Content: View>: NSView {
     var cursorAt: (@MainActor (CGPoint) -> NSCursor)?
     var onMouseExited: (@MainActor () -> Void)?
     var hostingView: NSHostingView<Content>?
+    var onDrop: (@MainActor (CanvasDropEvent) -> Bool)?
+
+    private var currentDropTypes: [String] = []
+
+    func updateRegisteredTypes(_ types: [String]) {
+        guard types != currentDropTypes else { return }
+        currentDropTypes = types
+        if types.isEmpty {
+            unregisterDraggedTypes()
+        } else {
+            registerForDraggedTypes(types.map { NSPasteboard.PasteboardType($0) })
+        }
+    }
+
+    private var cachedProviders: [NSItemProvider] = []
 
     private var trackingArea: NSTrackingArea?
 
@@ -102,6 +134,46 @@ final class CanvasNSHostView<Content: View>: NSView {
         }
     }
 
+    // MARK: - NSDraggingDestination
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        cachedProviders = extractProviders(from: sender)
+        let location = flippedLocation(from: sender)
+        var accepted = false
+        MainActor.assumeIsolated {
+            accepted = onDrop?(.updated(cachedProviders, location)) ?? false
+        }
+        return accepted ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        let location = flippedLocation(from: sender)
+        var accepted = false
+        MainActor.assumeIsolated {
+            accepted = onDrop?(.updated(cachedProviders, location)) ?? false
+        }
+        return accepted ? .copy : []
+    }
+
+    override func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        cachedProviders = []
+        MainActor.assumeIsolated {
+            _ = onDrop?(.exited)
+        }
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        let location = flippedLocation(from: sender)
+        var accepted = false
+        MainActor.assumeIsolated {
+            accepted = onDrop?(.performed(cachedProviders, location)) ?? false
+        }
+        cachedProviders = []
+        return accepted
+    }
+
+    // MARK: - Coordinate Helpers
+
     private func updateCursor(for event: NSEvent) {
         let location = flippedLocation(from: event)
         MainActor.assumeIsolated {
@@ -114,6 +186,35 @@ final class CanvasNSHostView<Content: View>: NSView {
         let location = convert(event.locationInWindow, from: nil)
         return CGPoint(x: location.x, y: bounds.height - location.y)
     }
+
+    private func flippedLocation(from sender: any NSDraggingInfo) -> CGPoint {
+        let location = convert(sender.draggingLocation, from: nil)
+        return CGPoint(x: location.x, y: bounds.height - location.y)
+    }
+
+    // MARK: - Provider Extraction
+
+    /// Build an NSItemProvider from the dragging pasteboard.
+    ///
+    /// Uses the fundamental `pasteboard.types` / `pasteboard.data(forType:)` API
+    /// which works reliably for both SwiftUI `.draggable()` (NSItemProvider-backed)
+    /// and legacy NSPasteboard drags.
+    private func extractProviders(from sender: any NSDraggingInfo) -> [NSItemProvider] {
+        let pasteboard = sender.draggingPasteboard
+        guard let types = pasteboard.types, !types.isEmpty else { return [] }
+        let provider = NSItemProvider()
+        for type in types {
+            guard let data = pasteboard.data(forType: type) else { continue }
+            provider.registerDataRepresentation(
+                forTypeIdentifier: type.rawValue,
+                visibility: .all
+            ) { completion in
+                completion(data, nil)
+                return nil
+            }
+        }
+        return provider.registeredTypeIdentifiers.isEmpty ? [] : [provider]
+    }
 }
 #endif
 
@@ -124,11 +225,14 @@ import UIKit
 struct CanvasHostView<Content: View>: UIViewRepresentable {
 
     let onPan: @MainActor (CGSize) -> Void
+    var registeredDropTypes: [String] = []
+    var onDrop: (@MainActor (CanvasDropEvent) -> Bool)? = nil
     @ViewBuilder var content: Content
 
     func makeUIView(context: Context) -> CanvasUIHostView<Content> {
         let hostView = CanvasUIHostView<Content>()
         hostView.onPan = onPan
+        hostView.onDrop = onDrop
         let hosting = UIHostingController(rootView: content)
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
         hosting.view.backgroundColor = .clear
@@ -145,15 +249,23 @@ struct CanvasHostView<Content: View>: UIViewRepresentable {
 
     func updateUIView(_ uiView: CanvasUIHostView<Content>, context: Context) {
         uiView.onPan = onPan
+        uiView.onDrop = onDrop
         uiView.hostingController?.rootView = content
     }
 }
 
-final class CanvasUIHostView<Content: View>: UIView {
+final class CanvasUIHostView<Content: View>: UIView, UIDropInteractionDelegate {
 
     var onPan: (@MainActor (CGSize) -> Void)?
     var hostingController: UIHostingController<Content>?
 
+    var onDrop: (@MainActor (CanvasDropEvent) -> Bool)? {
+        didSet {
+            setupDropIfNeeded()
+        }
+    }
+
+    private var dropInteraction: UIDropInteraction?
     private var lastPanTranslation: CGPoint = .zero
 
     override init(frame: CGRect) {
@@ -171,6 +283,13 @@ final class CanvasUIHostView<Content: View>: UIView {
         panGesture.minimumNumberOfTouches = 2
         panGesture.maximumNumberOfTouches = 2
         addGestureRecognizer(panGesture)
+    }
+
+    private func setupDropIfNeeded() {
+        guard onDrop != nil, dropInteraction == nil else { return }
+        let interaction = UIDropInteraction(delegate: self)
+        addInteraction(interaction)
+        dropInteraction = interaction
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -191,6 +310,36 @@ final class CanvasUIHostView<Content: View>: UIView {
             lastPanTranslation = .zero
         default:
             break
+        }
+    }
+
+    // MARK: - UIDropInteractionDelegate
+
+    func dropInteraction(_ interaction: UIDropInteraction, canHandle session: any UIDropSession) -> Bool {
+        return onDrop != nil
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: any UIDropSession) -> UIDropProposal {
+        let location = session.location(in: self)
+        let providers = session.items.map { $0.itemProvider }
+        var accepted = false
+        MainActor.assumeIsolated {
+            accepted = onDrop?(.updated(providers, location)) ?? false
+        }
+        return UIDropProposal(operation: accepted ? .copy : .cancel)
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, sessionDidExit session: any UIDropSession) {
+        MainActor.assumeIsolated {
+            _ = onDrop?(.exited)
+        }
+    }
+
+    func dropInteraction(_ interaction: UIDropInteraction, performDrop session: any UIDropSession) {
+        let location = session.location(in: self)
+        let providers = session.items.map { $0.itemProvider }
+        MainActor.assumeIsolated {
+            _ = onDrop?(.performed(providers, location))
         }
     }
 }

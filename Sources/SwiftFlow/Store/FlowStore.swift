@@ -13,6 +13,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var selectedEdgeIDs: Set<String>
     public private(set) var animatedEdgeIDs: Set<String>
     public private(set) var hoveredNodeID: String?
+    public private(set) var dropTargetNodeID: String?
+    public private(set) var dropTargetEdgeID: String?
     public var configuration: FlowConfiguration
 
     // MARK: - Lookup Tables
@@ -132,6 +134,13 @@ public final class FlowStore<Data: Sendable & Hashable> {
         nodes[index].position = snapped
         nodeLookup[nodeID] = nodes[index]
         onNodesChange?([.position(nodeID: nodeID, position: snapped)])
+    }
+
+    public func updateNode(_ nodeID: String, _ transform: (inout FlowNode<Data>) -> Void) {
+        guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
+        transform(&nodes[index])
+        nodeLookup[nodeID] = nodes[index]
+        onNodesChange?([.replace(nodes[index])])
     }
 
     public func updateNodeSize(_ nodeID: String, size: CGSize) {
@@ -501,6 +510,34 @@ public final class FlowStore<Data: Sendable & Hashable> {
             nodeLookup[newID] = nodes[index]
         }
         hoveredNodeID = nodeID
+    }
+
+    public func setDropTargetNode(_ nodeID: String?) {
+        guard dropTargetNodeID != nodeID else { return }
+        if let oldID = dropTargetNodeID,
+           let index = nodes.firstIndex(where: { $0.id == oldID }) {
+            nodes[index].isDropTarget = false
+            nodeLookup[oldID] = nodes[index]
+        }
+        if let newID = nodeID,
+           let index = nodes.firstIndex(where: { $0.id == newID }) {
+            nodes[index].isDropTarget = true
+            nodeLookup[newID] = nodes[index]
+        }
+        dropTargetNodeID = nodeID
+    }
+
+    public func setDropTargetEdge(_ edgeID: String?) {
+        guard dropTargetEdgeID != edgeID else { return }
+        if let oldID = dropTargetEdgeID,
+           let index = edges.firstIndex(where: { $0.id == oldID }) {
+            edges[index].isDropTarget = false
+        }
+        if let newID = edgeID,
+           let index = edges.firstIndex(where: { $0.id == newID }) {
+            edges[index].isDropTarget = true
+        }
+        dropTargetEdgeID = edgeID
     }
 
     // MARK: - Viewport

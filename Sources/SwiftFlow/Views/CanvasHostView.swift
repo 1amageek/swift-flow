@@ -20,6 +20,7 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
     let onMouseExited: @MainActor () -> Void
     var registeredDropTypes: [String] = []
     var onDrop: (@MainActor (CanvasDropEvent) -> Bool)? = nil
+    var onKeyDown: (@MainActor (UInt16) -> Bool)? = nil
     @ViewBuilder var content: Content
 
     func makeNSView(context: Context) -> CanvasNSHostView<Content> {
@@ -29,6 +30,7 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
         hostView.cursorAt = cursorAt
         hostView.onMouseExited = onMouseExited
         hostView.onDrop = onDrop
+        hostView.onKeyDown = onKeyDown
         hostView.updateRegisteredTypes(registeredDropTypes)
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
@@ -49,6 +51,7 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
         nsView.cursorAt = cursorAt
         nsView.onMouseExited = onMouseExited
         nsView.onDrop = onDrop
+        nsView.onKeyDown = onKeyDown
         nsView.updateRegisteredTypes(registeredDropTypes)
         nsView.hostingView?.rootView = content
     }
@@ -62,6 +65,7 @@ final class CanvasNSHostView<Content: View>: NSView {
     var onMouseExited: (@MainActor () -> Void)?
     var hostingView: NSHostingView<Content>?
     var onDrop: (@MainActor (CanvasDropEvent) -> Bool)?
+    var onKeyDown: (@MainActor (UInt16) -> Bool)?
 
     private var currentDropTypes: [String] = []
 
@@ -80,6 +84,16 @@ final class CanvasNSHostView<Content: View>: NSView {
     private var trackingArea: NSTrackingArea?
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        var handled = false
+        MainActor.assumeIsolated {
+            handled = onKeyDown?(event.keyCode) ?? false
+        }
+        if !handled {
+            super.keyDown(with: event)
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

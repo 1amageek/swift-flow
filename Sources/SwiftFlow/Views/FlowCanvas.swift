@@ -315,7 +315,15 @@ public struct FlowCanvas<
                 store.setHoveredNode(nil)
             },
             registeredDropTypes: registeredDropTypes,
-            onDrop: dropHandler
+            onDrop: dropHandler,
+            onKeyDown: { keyCode in
+                // 51 = backspace (delete), 117 = forward delete
+                if keyCode == 51 || keyCode == 117 {
+                    store.deleteSelection()
+                    return true
+                }
+                return false
+            }
         ) {
             canvasView
         }

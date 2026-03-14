@@ -2,6 +2,8 @@
 
 A Canvas-based flow diagram library for SwiftUI, supporting iOS and macOS.
 
+![SwiftFlow Screenshot](screenshot.png)
+
 Edges are batch-drawn via `GraphicsContext` for performance. Nodes are rendered as SwiftUI views via `resolveSymbol`, so you can use any SwiftUI view as a node.
 
 ## Requirements

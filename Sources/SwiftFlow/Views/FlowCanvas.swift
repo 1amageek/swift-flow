@@ -261,14 +261,6 @@ public struct FlowCanvas<
             #endif
         }
         .focusable()
-        .onKeyPress(.delete) {
-            store.deleteSelection()
-            return .handled
-        }
-        .onKeyPress(.deleteForward) {
-            store.deleteSelection()
-            return .handled
-        }
         .onAppear {
             store.undoManager = undoManager
         }
@@ -316,12 +308,7 @@ public struct FlowCanvas<
             },
             registeredDropTypes: registeredDropTypes,
             onDrop: dropHandler,
-            onKeyDown: { keyCode in
-                // 51 = backspace (delete), 117 = forward delete
-                if keyCode == 51 || keyCode == 117 {
-                    store.deleteSelection()
-                    return true
-                }
+            onKeyDown: { _ in
                 return false
             }
         ) {

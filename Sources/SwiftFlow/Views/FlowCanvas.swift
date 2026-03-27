@@ -819,8 +819,8 @@ public struct FlowCanvas<
             }
         }
 
-        // Double-tap detection (only for non-additive taps on actual targets)
-        if !isAdditive, currentTarget != .none {
+        // Double-tap detection
+        if !isAdditive {
             if doubleTapDetector.recordTap(target: currentTarget) {
                 switch currentTarget {
                 case .node(let nodeID):
@@ -828,7 +828,7 @@ public struct FlowCanvas<
                 case .edge(let edgeID):
                     store.onEdgeDoubleTap?(edgeID)
                 case .none:
-                    break
+                    store.onCanvasDoubleTap?(canvasPoint)
                 }
             }
         } else {

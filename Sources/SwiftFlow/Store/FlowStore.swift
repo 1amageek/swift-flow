@@ -51,6 +51,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var onConnect: ((ConnectionProposal) -> Void)?
     public var onNodeDoubleTap: ((String) -> Void)?
     public var onEdgeDoubleTap: ((String) -> Void)?
+    public var onCanvasDoubleTap: ((CGPoint) -> Void)?
+    public var onConnectionRejected: ((ConnectionProposal) -> Void)?
 
     // MARK: - Init
 
@@ -857,6 +859,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
         let validator = configuration.connectionValidator ?? DefaultConnectionValidator()
         if validator.validate(proposal) {
             onConnect?(proposal)
+        } else {
+            onConnectionRejected?(proposal)
         }
         connectionDraft = nil
     }

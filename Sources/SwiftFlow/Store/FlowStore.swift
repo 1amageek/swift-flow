@@ -887,7 +887,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         return HandleInfo(point: point, position: decl.position, type: decl.type)
     }
 
-    func findNearestHandle(at canvasPoint: CGPoint, excludingNodeID: String, targetType: HandleType, threshold: CGFloat = 20) -> (nodeID: String, handleID: String)? {
+    func findNearestHandle(at canvasPoint: CGPoint, excludingNodeID: String, targetType: HandleType, threshold: CGFloat = 40) -> (nodeID: String, handleID: String)? {
         var bestDistance: CGFloat = threshold
         var bestResult: (nodeID: String, handleID: String)?
 
@@ -909,7 +909,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     // MARK: - Hit Testing
 
-    func hitTestHandle(at canvasPoint: CGPoint, threshold: CGFloat = 10) -> HandleHitResult? {
+    func hitTestHandle(at canvasPoint: CGPoint, threshold: CGFloat = 25) -> HandleHitResult? {
         var bestDistance: CGFloat = threshold
         var bestResult: HandleHitResult?
 

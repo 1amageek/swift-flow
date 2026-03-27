@@ -745,7 +745,7 @@ public struct FlowCanvas<
                     let targetType: HandleType = (handle.handleType == .source) ? .target : .source
                     if let target = store.findNearestHandle(
                         at: canvasPoint, excludingNodeID: handle.nodeID,
-                        targetType: targetType, threshold: 20
+                        targetType: targetType, threshold: 40
                     ) {
                         store.endConnection(targetNodeID: target.nodeID, targetHandleID: target.handleID)
                     } else {

@@ -245,6 +245,7 @@ public struct FlowCanvas<
         #if os(iOS)
         .gesture(magnifyGesture)
         #endif
+        #if os(macOS)
         .gesture(
             SpatialTapGesture()
                 .modifiers(.command)
@@ -252,6 +253,7 @@ public struct FlowCanvas<
                     handleTap(at: value.location, isAdditive: true)
                 }
         )
+        #endif
         .onTapGesture { location in
             handleTap(at: location, isAdditive: false)
         }

@@ -28,7 +28,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     // MARK: - Internal State
 
-    var connectionDraft: ConnectionDraft?
+    public var connectionDraft: ConnectionDraft?
     var selectionRect: SelectionRect?
 
     // MARK: - Animation State
@@ -1051,12 +1051,12 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
 // MARK: - ConnectionDraft
 
-struct ConnectionDraft {
-    var sourceNodeID: String
-    var sourceHandleID: String?
-    var sourceHandleType: HandleType
-    var sourceHandlePosition: HandlePosition
-    var currentPoint: CGPoint
+public struct ConnectionDraft {
+    public var sourceNodeID: String
+    public var sourceHandleID: String?
+    public var sourceHandleType: HandleType
+    public var sourceHandlePosition: HandlePosition
+    public var currentPoint: CGPoint
 }
 
 // MARK: - HandleHitResult

@@ -3,6 +3,7 @@ import Foundation
 /// Represents the target of a tap event for double-tap detection.
 enum DoubleTapTarget: Equatable, Sendable {
     case none
+    case canvas
     case node(String)
     case edge(String)
 }
@@ -27,7 +28,7 @@ struct DoubleTapDetector: Sendable {
     /// Records a tap on the given target and returns whether it constitutes a double-tap.
     ///
     /// Call this after performing the single-tap action. If `true` is returned,
-    /// fire the double-tap callback. A `.none` target always resets the tracker.
+    /// fire the double-tap callback. A `.none` target is reserved for explicit resets.
     mutating func recordTap(target: DoubleTapTarget) -> Bool {
         guard target != .none else {
             reset()

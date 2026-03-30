@@ -788,7 +788,7 @@ public struct FlowCanvas<
         } else if let edgeID = store.hitTestEdge(at: canvasPoint) {
             currentTarget = .edge(edgeID)
         } else {
-            currentTarget = .none
+            currentTarget = .canvas
         }
 
         // Perform single-tap action immediately (no delay)
@@ -813,7 +813,7 @@ public struct FlowCanvas<
             } else {
                 store.selectEdge(edgeID)
             }
-        case .none:
+        case .canvas, .none:
             if !isAdditive {
                 store.clearSelection()
             }
@@ -827,8 +827,10 @@ public struct FlowCanvas<
                     store.onNodeDoubleTap?(nodeID)
                 case .edge(let edgeID):
                     store.onEdgeDoubleTap?(edgeID)
-                case .none:
+                case .canvas:
                     store.onCanvasDoubleTap?(canvasPoint)
+                case .none:
+                    break
                 }
             }
         } else {

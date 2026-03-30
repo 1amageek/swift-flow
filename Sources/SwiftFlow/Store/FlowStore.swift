@@ -1061,6 +1061,20 @@ public struct ConnectionDraft {
     public var sourceHandleType: HandleType
     public var sourceHandlePosition: HandlePosition
     public var currentPoint: CGPoint
+
+    public init(
+        sourceNodeID: String,
+        sourceHandleID: String?,
+        sourceHandleType: HandleType,
+        sourceHandlePosition: HandlePosition,
+        currentPoint: CGPoint
+    ) {
+        self.sourceNodeID = sourceNodeID
+        self.sourceHandleID = sourceHandleID
+        self.sourceHandleType = sourceHandleType
+        self.sourceHandlePosition = sourceHandlePosition
+        self.currentPoint = currentPoint
+    }
 }
 
 // MARK: - HandleHitResult

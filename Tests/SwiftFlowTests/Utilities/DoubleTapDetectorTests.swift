@@ -40,6 +40,15 @@ struct DoubleTapDetectorTests {
         #expect(result == false)
     }
 
+    @Test("Canvas target supports double-tap detection")
+    func canvasDoubleTap() {
+        var detector = DoubleTapDetector(interval: 1.0)
+        let first = detector.recordTap(target: .canvas)
+        #expect(first == false)
+        let second = detector.recordTap(target: .canvas)
+        #expect(second == true)
+    }
+
     @Test("Edge double-tap detection")
     func edgeDoubleTap() {
         var detector = DoubleTapDetector(interval: 1.0)

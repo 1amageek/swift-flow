@@ -6,11 +6,13 @@ import SwiftUI
 public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
 
     public let node: FlowNode<NodeData>
+    public let context: NodeRenderContext
 
     static var handleInset: CGFloat { FlowHandle.diameter / 2 }
 
-    public init(node: FlowNode<NodeData>) {
+    public init(node: FlowNode<NodeData>, context: NodeRenderContext) {
         self.node = node
+        self.context = context
     }
 
     public var body: some View {
@@ -18,22 +20,18 @@ public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
 
         ZStack {
             RoundedRectangle(cornerRadius: 8)
-                .fill(.background)
-                .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
+                .fill(fillStyle)
+                .shadow(color: shadowColor, radius: 1, y: 1)
                 .shadow(
-                    color: node.isSelected ? Color.accentColor.opacity(0.35)
-                         : node.isHovered ? .black.opacity(0.14)
-                         : .black.opacity(0.08),
-                    radius: node.isSelected ? 8 : node.isHovered ? 5 : 3,
-                    y: node.isSelected ? 0 : node.isHovered ? 1 : 2
+                    color: emphasisShadowColor,
+                    radius: emphasisShadowRadius,
+                    y: emphasisShadowYOffset
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(
-                            node.isSelected ? Color.accentColor
-                              : node.isHovered ? Color.primary.opacity(0.25)
-                              : Color.primary.opacity(0.12),
-                            lineWidth: node.isSelected ? 1.5 : node.isHovered ? 0.75 : 0.5
+                            borderColor,
+                            style: StrokeStyle(lineWidth: borderLineWidth, dash: borderDash)
                         )
                 }
                 .overlay {
@@ -46,10 +44,126 @@ public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
 
             ForEach(node.handles, id: \.id) { handle in
                 FlowHandle(handle.id, type: handle.type, position: handle.position)
+                    .overlay {
+                        if context.connectedHandleID == handle.id {
+                            Circle()
+                                .strokeBorder(Color.accentColor, lineWidth: 2)
+                                .padding(-4)
+                        }
+                    }
+                    .scaleEffect(context.connectedHandleID == handle.id ? 1.12 : 1.0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: handleAlignment(handle.position))
             }
         }
         .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
+        .opacity(contentOpacity)
+    }
+
+    private var fillStyle: AnyShapeStyle {
+        switch node.phase {
+        case .normal:
+            return AnyShapeStyle(.background)
+        case .draft(.neutral):
+            return AnyShapeStyle(Color.secondary.opacity(0.08))
+        case .draft(.valid):
+            return AnyShapeStyle(Color.accentColor.opacity(0.08))
+        case .draft(.invalid):
+            return AnyShapeStyle(Color.red.opacity(0.08))
+        }
+    }
+
+    private var shadowColor: Color {
+        switch node.phase {
+        case .draft:
+            return .clear
+        case .normal:
+            return .black.opacity(0.06)
+        }
+    }
+
+    private var emphasisShadowColor: Color {
+        switch node.phase {
+        case .normal:
+            if node.isSelected { return Color.accentColor.opacity(0.35) }
+            if node.isHovered { return .black.opacity(0.14) }
+            return .black.opacity(0.08)
+        case .draft(.neutral):
+            return Color.secondary.opacity(0.12)
+        case .draft(.valid):
+            return Color.accentColor.opacity(0.28)
+        case .draft(.invalid):
+            return Color.red.opacity(0.22)
+        }
+    }
+
+    private var emphasisShadowRadius: CGFloat {
+        switch node.phase {
+        case .normal:
+            if node.isSelected { return 8 }
+            if node.isHovered { return 5 }
+            return 3
+        case .draft:
+            return 0
+        }
+    }
+
+    private var emphasisShadowYOffset: CGFloat {
+        switch node.phase {
+        case .normal:
+            if node.isSelected { return 0 }
+            if node.isHovered { return 1 }
+            return 2
+        case .draft:
+            return 0
+        }
+    }
+
+    private var borderColor: Color {
+        switch node.phase {
+        case .normal:
+            if node.isSelected { return .accentColor }
+            if node.isHovered { return Color.primary.opacity(0.25) }
+            return Color.primary.opacity(0.12)
+        case .draft(.neutral):
+            return Color.secondary.opacity(0.45)
+        case .draft(.valid):
+            return Color.accentColor.opacity(0.8)
+        case .draft(.invalid):
+            return Color.red.opacity(0.8)
+        }
+    }
+
+    private var borderLineWidth: CGFloat {
+        switch node.phase {
+        case .normal:
+            if node.isSelected { return 1.5 }
+            if node.isHovered { return 0.75 }
+            return 0.5
+        case .draft:
+            return 1.25
+        }
+    }
+
+    private var borderDash: [CGFloat] {
+        switch node.phase {
+        case .normal:
+            return []
+        case .draft:
+            return [6, 4]
+        }
+    }
+
+    private var contentOpacity: CGFloat {
+        switch node.phase {
+        case .normal:
+            return 1
+        case .draft(.neutral):
+            return 0.76
+        case .draft(.valid):
+            return 0.9
+        case .draft(.invalid):
+            return 0.85
+        }
     }
 
     private func handleAlignment(_ position: HandlePosition) -> Alignment {

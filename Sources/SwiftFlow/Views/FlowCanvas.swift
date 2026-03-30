@@ -10,7 +10,7 @@ public struct FlowCanvas<
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.undoManager) private var undoManager
 
-    private let nodeContentBuilder: (FlowNode<NodeData>) -> NodeView
+    private let nodeContentBuilder: (FlowNode<NodeData>, NodeRenderContext) -> NodeView
     private let edgeContentBuilder: ((FlowEdge, EdgeGeometry) -> AnyView)?
     private var nodeAccessoryBuilder: ((FlowNode<NodeData>) -> AnyView)?
     private var edgeAccessoryBuilder: ((FlowEdge) -> AnyView)?
@@ -24,7 +24,9 @@ public struct FlowCanvas<
 
     public init(store: FlowStore<NodeData>) where NodeView == DefaultNodeContent<NodeData> {
         self.store = store
-        self.nodeContentBuilder = { node in DefaultNodeContent(node: node) }
+        self.nodeContentBuilder = { node, context in
+            DefaultNodeContent(node: node, context: context)
+        }
         self.edgeContentBuilder = nil
         self.nodeAccessoryBuilder = nil
         self.edgeAccessoryBuilder = nil
@@ -34,7 +36,7 @@ public struct FlowCanvas<
 
     public init(
         store: FlowStore<NodeData>,
-        @ViewBuilder nodeContent: @escaping (FlowNode<NodeData>) -> NodeView
+        @ViewBuilder nodeContent: @escaping (FlowNode<NodeData>, NodeRenderContext) -> NodeView
     ) {
         self.store = store
         self.nodeContentBuilder = nodeContent
@@ -47,7 +49,7 @@ public struct FlowCanvas<
 
     public init<EdgeView: View>(
         store: FlowStore<NodeData>,
-        @ViewBuilder nodeContent: @escaping (FlowNode<NodeData>) -> NodeView,
+        @ViewBuilder nodeContent: @escaping (FlowNode<NodeData>, NodeRenderContext) -> NodeView,
         @ViewBuilder edgeContent: @escaping (FlowEdge, EdgeGeometry) -> EdgeView
     ) {
         self.store = store
@@ -64,7 +66,9 @@ public struct FlowCanvas<
         @ViewBuilder edgeContent: @escaping (FlowEdge, EdgeGeometry) -> EdgeView
     ) where NodeView == DefaultNodeContent<NodeData> {
         self.store = store
-        self.nodeContentBuilder = { node in DefaultNodeContent(node: node) }
+        self.nodeContentBuilder = { node, context in
+            DefaultNodeContent(node: node, context: context)
+        }
         self.edgeContentBuilder = { edge, geometry in AnyView(edgeContent(edge, geometry)) }
         self.nodeAccessoryBuilder = nil
         self.edgeAccessoryBuilder = nil
@@ -232,7 +236,7 @@ public struct FlowCanvas<
             drawConnectionDraft(context: &context, canvasSize: canvasSize)
         } symbols: {
             ForEach(store.nodes) { node in
-                nodeContentBuilder(node)
+                nodeContentBuilder(node, nodeRenderContext(for: node))
                     .tag(node.id)
             }
             if let edgeContentBuilder {
@@ -648,9 +652,9 @@ public struct FlowCanvas<
             ?? .zero
 
         let screenFrom = viewport.canvasToScreen(sourcePoint)
-        let screenTo = draft.currentPoint
-
-        let targetPosition = inferTargetPosition(from: screenFrom, to: screenTo)
+        let target = resolvedDraftTarget(for: draft)
+        let screenTo = target?.screenPoint ?? draft.currentPoint
+        let targetPosition = target?.position ?? inferTargetPosition(from: screenFrom, to: screenTo)
         let calculator = FlowStore<NodeData>.pathCalculator(for: store.configuration.defaultEdgePathType)
         let edgePath = calculator.path(
             from: screenFrom, sourcePosition: draft.sourceHandlePosition,
@@ -727,7 +731,13 @@ public struct FlowCanvas<
                         ))
                     }
                 case .connection:
-                    store.updateConnection(to: value.location)
+                    let canvasPoint = store.viewport.screenToCanvas(value.location)
+                    let target = draftConnectionTarget(at: canvasPoint)
+                    store.updateConnection(
+                        to: value.location,
+                        targetNodeID: target?.nodeID,
+                        targetHandleID: target?.handleID
+                    )
                 }
 
                 #if os(macOS)
@@ -742,11 +752,7 @@ public struct FlowCanvas<
                     store.completeMoveNodes(from: startPositions)
                 case .connection(let handle):
                     let canvasPoint = store.viewport.screenToCanvas(value.location)
-                    let targetType: HandleType = (handle.handleType == .source) ? .target : .source
-                    if let target = store.findNearestHandle(
-                        at: canvasPoint, excludingNodeID: handle.nodeID,
-                        targetType: targetType, threshold: 40
-                    ) {
+                    if let target = draftConnectionTarget(at: canvasPoint, from: handle) {
                         store.endConnection(targetNodeID: target.nodeID, targetHandleID: target.handleID)
                     } else {
                         store.cancelConnection()
@@ -946,6 +952,60 @@ public struct FlowCanvas<
         return Path(path.cgPath.copy(using: [transform]) ?? path.cgPath)
     }
 
+    private func nodeRenderContext(for node: FlowNode<NodeData>) -> NodeRenderContext {
+        guard let draft = store.connectionDraft,
+              draft.targetNodeID == node.id else {
+            return NodeRenderContext()
+        }
+        return NodeRenderContext(connectedHandleID: draft.targetHandleID)
+    }
+
+    private func draftConnectionTarget(
+        at canvasPoint: CGPoint,
+        from handle: HandleHitResult? = nil
+    ) -> (nodeID: String, handleID: String)? {
+        let sourceHandle = handle ?? connectionSourceHandle()
+        guard let sourceHandle else { return nil }
+        let targetType: HandleType = sourceHandle.handleType == .source ? .target : .source
+        return store.findNearestHandle(
+            at: canvasPoint,
+            excludingNodeID: sourceHandle.nodeID,
+            targetType: targetType,
+            threshold: 40
+        )
+    }
+
+    private func connectionSourceHandle() -> HandleHitResult? {
+        guard let draft = store.connectionDraft else { return nil }
+        return HandleHitResult(
+            nodeID: draft.sourceNodeID,
+            handleID: draft.sourceHandleID,
+            handleType: draft.sourceHandleType,
+            handlePosition: draft.sourceHandlePosition
+        )
+    }
+
+    private func resolvedDraftTarget(for draft: ConnectionDraft) -> (screenPoint: CGPoint, position: HandlePosition)? {
+        guard let targetNodeID = draft.targetNodeID else { return nil }
+        if let targetHandleID = draft.targetHandleID,
+           let handleInfo = store.handleInfo(nodeID: targetNodeID, handleID: targetHandleID) {
+            return (
+                screenPoint: store.viewport.canvasToScreen(handleInfo.point),
+                position: handleInfo.position
+            )
+        }
+        guard let node = store.nodeLookup[targetNodeID] else { return nil }
+        let center = CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y + node.size.height / 2)
+        let screenCenter = store.viewport.canvasToScreen(center)
+        let sourceScreenPoint = store.viewport.canvasToScreen(
+            store.handleInfo(nodeID: draft.sourceNodeID, handleID: draft.sourceHandleID)?.point ?? center
+        )
+        return (
+            screenPoint: screenCenter,
+            position: inferTargetPosition(from: sourceScreenPoint, to: screenCenter)
+        )
+    }
+
 
     private func inferTargetPosition(from source: CGPoint, to target: CGPoint) -> HandlePosition {
         let dx = target.x - source.x
@@ -1020,10 +1080,12 @@ private struct DragPayload: Sendable, Hashable, Codable, Transferable {
 private struct PreviewNode: View {
 
     let node: FlowNode<PreviewNodeData>
+    let context: NodeRenderContext
     static var handleInset: CGFloat { FlowHandle.diameter / 2 }
 
-    init(_ node: FlowNode<PreviewNodeData>) {
+    init(node: FlowNode<PreviewNodeData>, context: NodeRenderContext) {
         self.node = node
+        self.context = context
     }
 
     var body: some View {
@@ -1034,33 +1096,33 @@ private struct PreviewNode: View {
 
             ForEach(node.handles, id: \.id) { handle in
                 FlowHandle(handle.id, type: handle.type, position: handle.position)
+                    .overlay {
+                        if context.connectedHandleID == handle.id {
+                            Circle()
+                                .strokeBorder(handleHighlightColor, lineWidth: 2)
+                                .padding(-4)
+                        }
+                    }
+                    .scaleEffect(context.connectedHandleID == handle.id ? 1.15 : 1.0)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: handleAlignment(handle.position))
             }
         }
         .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
+        .opacity(cardOpacity)
     }
 
     private var card: some View {
         RoundedRectangle(cornerRadius: 10)
-            .fill(node.isDropTarget ? AnyShapeStyle(Color.accentColor.opacity(0.08)) : AnyShapeStyle(.background))
-            .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
+            .fill(cardFillStyle)
+            .shadow(color: baseShadowColor, radius: 1, y: 1)
             .shadow(
-                color: node.isDropTarget ? Color.accentColor.opacity(0.5)
-                     : node.isSelected ? Color.accentColor.opacity(0.4)
-                     : node.isHovered ? .black.opacity(0.14)
-                     : .black.opacity(0.08),
-                radius: node.isDropTarget ? 10 : node.isSelected ? 8 : node.isHovered ? 5 : 3,
-                y: node.isDropTarget ? 0 : node.isSelected ? 0 : node.isHovered ? 1 : 2
+                color: focusShadowColor,
+                radius: focusShadowRadius,
+                y: focusShadowYOffset
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(
-                        node.isDropTarget ? Color.accentColor
-                          : node.isSelected ? Color.accentColor
-                          : node.isHovered ? Color.primary.opacity(0.25)
-                          : Color.primary.opacity(0.1),
-                        lineWidth: node.isDropTarget ? 2.0 : node.isSelected ? 1.5 : node.isHovered ? 0.75 : 0.5
-                    )
+                    .strokeBorder(borderColor, style: StrokeStyle(lineWidth: borderLineWidth, dash: borderDash))
             }
             .overlay(alignment: .leading) { cardContent }
             .scaleEffect(node.isDropTarget ? 1.04 : 1.0)
@@ -1191,7 +1253,7 @@ private struct PreviewNode: View {
         switch node.data.category {
         case "Trigger":   .orange
         case "Security":  .red
-        case "Logic":     .purple
+        case "Logic":     .pink
         case "Data":      .blue
         case "Transform": .teal
         case "Storage":   .indigo
@@ -1199,6 +1261,127 @@ private struct PreviewNode: View {
         case "Queue":     .brown
         case "Output":    .green
         default:          .gray
+        }
+    }
+
+    private var cardFillStyle: AnyShapeStyle {
+        switch node.phase {
+        case .normal:
+            return node.isDropTarget
+                ? AnyShapeStyle(Color.accentColor.opacity(0.08))
+                : AnyShapeStyle(.background)
+        case .draft(.neutral):
+            return AnyShapeStyle(categoryColor.opacity(0.08))
+        case .draft(.valid):
+            return AnyShapeStyle(Color.accentColor.opacity(0.12))
+        case .draft(.invalid):
+            return AnyShapeStyle(Color.red.opacity(0.1))
+        }
+    }
+
+    private var baseShadowColor: Color {
+        switch node.phase {
+        case .normal:
+            return .black.opacity(0.06)
+        case .draft:
+            return .clear
+        }
+    }
+
+    private var focusShadowColor: Color {
+        switch node.phase {
+        case .normal:
+            if node.isDropTarget { return Color.accentColor.opacity(0.5) }
+            if node.isSelected { return Color.accentColor.opacity(0.4) }
+            if node.isHovered { return .black.opacity(0.14) }
+            return .black.opacity(0.08)
+        case .draft(.neutral):
+            return categoryColor.opacity(0.18)
+        case .draft(.valid):
+            return Color.accentColor.opacity(0.26)
+        case .draft(.invalid):
+            return Color.red.opacity(0.22)
+        }
+    }
+
+    private var focusShadowRadius: CGFloat {
+        switch node.phase {
+        case .normal:
+            if node.isDropTarget { return 10 }
+            if node.isSelected { return 8 }
+            if node.isHovered { return 5 }
+            return 3
+        case .draft:
+            return 0
+        }
+    }
+
+    private var focusShadowYOffset: CGFloat {
+        switch node.phase {
+        case .normal:
+            if node.isDropTarget || node.isSelected { return 0 }
+            if node.isHovered { return 1 }
+            return 2
+        case .draft:
+            return 0
+        }
+    }
+
+    private var borderColor: Color {
+        switch node.phase {
+        case .normal:
+            if node.isDropTarget || node.isSelected { return .accentColor }
+            if node.isHovered { return Color.primary.opacity(0.25) }
+            return Color.primary.opacity(0.1)
+        case .draft(.neutral):
+            return categoryColor.opacity(0.5)
+        case .draft(.valid):
+            return Color.accentColor.opacity(0.85)
+        case .draft(.invalid):
+            return Color.red.opacity(0.85)
+        }
+    }
+
+    private var borderLineWidth: CGFloat {
+        switch node.phase {
+        case .normal:
+            if node.isDropTarget { return 2.0 }
+            if node.isSelected { return 1.5 }
+            if node.isHovered { return 0.75 }
+            return 0.5
+        case .draft:
+            return 1.25
+        }
+    }
+
+    private var borderDash: [CGFloat] {
+        switch node.phase {
+        case .normal:
+            return []
+        case .draft:
+            return [7, 4]
+        }
+    }
+
+    private var cardOpacity: CGFloat {
+        switch node.phase {
+        case .normal:
+            return 1
+        case .draft(.neutral):
+            return 0.78
+        case .draft(.valid):
+            return 0.92
+        case .draft(.invalid):
+            return 0.86
+        }
+    }
+
+    private var handleHighlightColor: Color {
+        switch node.phase {
+        case .draft(.invalid):
+            return .red
+        case .draft(.neutral), .draft(.valid), .normal:
+            return .accentColor
         }
     }
 
@@ -1215,10 +1398,11 @@ private struct PreviewNode: View {
 @MainActor
 @Observable
 private final class PreviewInteractionState {
-    var lastEvent: String = "Double-tap empty canvas, drag into Notify to see rejection, or inject a draft."
+    var lastEvent: String = "Double-tap the canvas, drag into Notify to reject, or inject a draft node."
     var lastCanvasDoubleTap: String = "Not yet"
     var lastRejectedConnection: String = "Drag any output into Notify"
     var draftStatus: String = "Hidden"
+    var draftTarget: String = "No target"
 }
 
 private struct PreviewConnectionValidator: ConnectionValidating {
@@ -1231,36 +1415,65 @@ private struct PreviewConnectionValidator: ConnectionValidating {
 private struct PreviewStatusPanel: View {
     let interaction: PreviewInteractionState
     let toggleDraft: () -> Void
+    let cycleDraftState: () -> Void
+    let toggleDraftTarget: () -> Void
+    let commitDraft: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("Preview Checks")
                 .font(.caption.bold())
                 .foregroundStyle(.secondary)
 
             Text(interaction.lastEvent)
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.primary)
+                .lineLimit(3)
 
             statusRow("Canvas Double-Tap", interaction.lastCanvasDoubleTap)
             statusRow("Rejected Connection", interaction.lastRejectedConnection)
-            statusRow("Programmatic Draft", interaction.draftStatus)
-            statusRow("Handle Size", "\(Int(FlowHandle.diameter))pt")
-            statusRow("Platform", platformNote)
+            statusRow("Draft Node", interaction.draftStatus)
+            statusRow("Draft Target", interaction.draftTarget)
 
-            Button(action: toggleDraft) {
-                Label(
-                    interaction.draftStatus == "Visible" ? "Clear Draft" : "Inject Draft",
-                    systemImage: interaction.draftStatus == "Visible" ? "xmark.circle" : "point.3.connected.trianglepath.dotted"
-                )
-                .font(.caption)
+            HStack(spacing: 6) {
+                Button(action: toggleDraft) {
+                    Label(
+                        interaction.draftStatus == "Hidden" ? "Inject" : "Clear",
+                        systemImage: interaction.draftStatus == "Hidden" ? "plus.circle" : "xmark.circle"
+                    )
+                    .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: cycleDraftState) {
+                    Label("State", systemImage: "paintpalette")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .disabled(interaction.draftStatus == "Hidden")
+
+                Button(action: toggleDraftTarget) {
+                    Label("Target", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .disabled(interaction.draftStatus == "Hidden")
             }
-            .buttonStyle(.borderedProminent)
             .controlSize(.small)
+
+            Button(action: commitDraft) {
+                Label("Commit", systemImage: "checkmark.circle")
+                    .font(.caption2)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(interaction.draftStatus == "Hidden" || interaction.draftStatus.hasPrefix("Normal"))
+
+            statusRow("Handle", "\(Int(FlowHandle.diameter))pt")
+            statusRow("Platform", platformNote)
         }
-        .padding(12)
-        .frame(width: 310, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(10)
+        .frame(width: 220, alignment: .leading)
     }
 
     private var platformNote: String {
@@ -1277,7 +1490,7 @@ private struct PreviewStatusPanel: View {
                 .font(.caption2.bold())
                 .foregroundStyle(.secondary)
             Text(value)
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.primary)
                 .lineLimit(2)
         }
@@ -1290,6 +1503,56 @@ private func previewPointText(_ point: CGPoint) -> String {
 
 private func previewProposalText(_ proposal: ConnectionProposal) -> String {
     "\(proposal.sourceNodeID) -> \(proposal.targetNodeID)"
+}
+
+private let previewDraftNodeID = "draft-preview"
+
+private func previewDraftPhaseText(_ phase: FlowNodePhase?) -> String {
+    guard let phase else { return "Hidden" }
+    switch phase {
+    case .normal:
+        return "Normal"
+    case .draft(.neutral):
+        return "Neutral"
+    case .draft(.valid):
+        return "Valid"
+    case .draft(.invalid):
+        return "Invalid"
+    }
+}
+
+private func previewDraftTargetText(_ targetHandleID: String?) -> String {
+    if let targetHandleID {
+        return "Handle \(targetHandleID)"
+    }
+    return "Free point"
+}
+
+private func previewDraftStatusText(_ node: FlowNode<PreviewNodeData>?) -> String {
+    guard let node else { return "Hidden" }
+    let scope = node.persistence == .persistent ? "Persistent" : "Transient"
+    return "\(previewDraftPhaseText(node.phase)) · \(scope)"
+}
+
+private func makePreviewDraftNode(phase: FlowNodePhase) -> FlowNode<PreviewNodeData> {
+    FlowNode(
+        id: previewDraftNodeID,
+        position: CGPoint(x: 660, y: 430),
+        size: CGSize(width: 160, height: 50),
+        data: PreviewNodeData(
+            title: "Review Draft",
+            category: "Network",
+            icon: "wand.and.stars",
+            badge: "TMP",
+            subtitle: "Transient node"
+        ),
+        phase: phase,
+        persistence: .transient,
+        handles: [
+            HandleDeclaration(id: "in", type: .target, position: .left),
+            HandleDeclaration(id: "out", type: .source, position: .right),
+        ]
+    )
 }
 
 #Preview("FlowCanvas") {
@@ -1380,9 +1643,11 @@ private func previewProposalText(_ proposal: ConnectionProposal) -> String {
     }()
     @Previewable @State var interaction = PreviewInteractionState()
     GeometryReader { geometry in
+        let previewDraftPoint = store.viewport.canvasToScreen(CGPoint(x: 760, y: 455))
+
         ZStack {
-            FlowCanvas(store: store) { node in
-                PreviewNode(node)
+            FlowCanvas(store: store) { node, context in
+                PreviewNode(node: node, context: context)
             }
             .nodeAccessory(placement: { node in
                 switch node.data.category {
@@ -1440,7 +1705,7 @@ private func previewProposalText(_ proposal: ConnectionProposal) -> String {
                 .background(.regularMaterial, in: Capsule())
                 .shadow(color: .black.opacity(0.12), radius: 6, y: 3)
             }
-            .dropDestination(for: [.json]) { phase in
+            .dropDestination(for: [UTType.json]) { phase in
                 switch phase {
                 case .updated(_, _, let target):
                     // All items use .json — accept all targets during hover.
@@ -1509,23 +1774,111 @@ private func previewProposalText(_ proposal: ConnectionProposal) -> String {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(12)
 
-            PreviewStatusPanel(interaction: interaction) {
-                if store.connectionDraft == nil {
-                    store.connectionDraft = ConnectionDraft(
-                        sourceNodeID: "router",
-                        sourceHandleID: "out",
-                        sourceHandleType: .source,
-                        sourceHandlePosition: .right,
-                        currentPoint: store.viewport.canvasToScreen(CGPoint(x: 640, y: 430))
-                    )
-                    interaction.draftStatus = "Visible"
-                    interaction.lastEvent = "Injected a connection draft from app state."
-                } else {
+            PreviewStatusPanel(
+                interaction: interaction,
+                toggleDraft: {
+                    if store.nodeLookup[previewDraftNodeID] == nil {
+                        store.addNode(makePreviewDraftNode(phase: .draft(.neutral)))
+                        store.connectionDraft = ConnectionDraft(
+                            sourceNodeID: "router",
+                            sourceHandleID: "out",
+                            sourceHandleType: .source,
+                            sourceHandlePosition: .right,
+                            targetNodeID: previewDraftNodeID,
+                            targetHandleID: "in",
+                            currentPoint: previewDraftPoint
+                        )
+                        interaction.draftStatus = previewDraftStatusText(store.nodeLookup[previewDraftNodeID])
+                        interaction.draftTarget = previewDraftTargetText("in")
+                        interaction.lastEvent = "Injected a transient draft node with a snapped draft edge."
+                    } else {
+                        store.connectionDraft = nil
+                        store.removeNode(previewDraftNodeID)
+                        interaction.draftStatus = "Hidden"
+                        interaction.draftTarget = "No target"
+                        interaction.lastEvent = "Cleared the transient draft node."
+                    }
+                },
+                cycleDraftState: {
+                    guard let node = store.nodeLookup[previewDraftNodeID] else { return }
+                    let nextState: DraftPresentationState
+                    switch node.phase {
+                    case .draft(.neutral):
+                        nextState = .valid
+                    case .draft(.valid):
+                        nextState = .invalid
+                    case .draft(.invalid), .normal:
+                        nextState = .neutral
+                    }
+                    store.updateNode(previewDraftNodeID) { draftNode in
+                        draftNode.phase = .draft(nextState)
+                    }
+                    interaction.draftStatus = previewDraftStatusText(store.nodeLookup[previewDraftNodeID])
+                    interaction.lastEvent = "Draft node switched to \(previewDraftPhaseText(.draft(nextState)).lowercased())."
+                },
+                toggleDraftTarget: {
+                    guard store.nodeLookup[previewDraftNodeID] != nil else { return }
+                    if store.connectionDraft == nil {
+                        store.connectionDraft = ConnectionDraft(
+                            sourceNodeID: "router",
+                            sourceHandleID: "out",
+                            sourceHandleType: .source,
+                            sourceHandlePosition: .right,
+                            currentPoint: previewDraftPoint
+                        )
+                    }
+                    let nextTargetHandleID: String? =
+                        store.connectionDraft?.targetHandleID == nil ? "in" : nil
+                    store.connectionDraft?.targetNodeID = nextTargetHandleID == nil ? nil : previewDraftNodeID
+                    store.connectionDraft?.targetHandleID = nextTargetHandleID
+                    store.connectionDraft?.currentPoint = previewDraftPoint
+                    interaction.draftTarget = previewDraftTargetText(nextTargetHandleID)
+                    interaction.lastEvent =
+                        nextTargetHandleID == nil
+                        ? "Draft edge released from the node and now points at a free location."
+                        : "Draft edge snapped to the draft node handle."
+                },
+                commitDraft: {
+                    guard store.nodeLookup[previewDraftNodeID] != nil else { return }
+
+                    if let draft = store.connectionDraft,
+                       let targetNodeID = draft.targetNodeID,
+                       targetNodeID == previewDraftNodeID {
+                        let proposal: ConnectionProposal
+                        if draft.sourceHandleType == .source {
+                            proposal = ConnectionProposal(
+                                sourceNodeID: draft.sourceNodeID,
+                                sourceHandleID: draft.sourceHandleID,
+                                targetNodeID: targetNodeID,
+                                targetHandleID: draft.targetHandleID
+                            )
+                        } else {
+                            proposal = ConnectionProposal(
+                                sourceNodeID: targetNodeID,
+                                sourceHandleID: draft.targetHandleID,
+                                targetNodeID: draft.sourceNodeID,
+                                targetHandleID: draft.sourceHandleID
+                            )
+                        }
+
+                        let validator = store.configuration.connectionValidator ?? DefaultConnectionValidator()
+                        if validator.validate(proposal) {
+                            store.onConnect?(proposal)
+                        } else {
+                            store.onConnectionRejected?(proposal)
+                        }
+                    }
+
+                    store.updateNode(previewDraftNodeID) { draftNode in
+                        draftNode.phase = .normal
+                        draftNode.persistence = .persistent
+                    }
                     store.connectionDraft = nil
-                    interaction.draftStatus = "Hidden"
-                    interaction.lastEvent = "Cleared the injected connection draft."
+                    interaction.draftStatus = previewDraftStatusText(store.nodeLookup[previewDraftNodeID])
+                    interaction.draftTarget = "No target"
+                    interaction.lastEvent = "Committed the draft node and cleared the draft edge."
                 }
-            }
+            )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .padding(12)
 
@@ -1558,6 +1911,13 @@ private func previewProposalText(_ proposal: ConnectionProposal) -> String {
                 interaction.lastRejectedConnection = previewProposalText(proposal)
                 interaction.lastEvent = "Rejected \(previewProposalText(proposal))."
             }
+            if let draft = store.nodeLookup[previewDraftNodeID] {
+                interaction.draftStatus = previewDraftStatusText(draft)
+            }
+            interaction.draftTarget =
+                store.connectionDraft == nil
+                ? "No target"
+                : previewDraftTargetText(store.connectionDraft?.targetHandleID)
             store.fitToContent(canvasSize: geometry.size)
         }
     }

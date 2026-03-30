@@ -238,6 +238,25 @@ struct FlowStoreTests {
         #expect(doc.nodes.allSatisfy { !$0.isHovered })
     }
 
+    @Test("Export excludes transient nodes and dangling edges")
+    func exportExcludesTransientNodes() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(
+            id: "draft",
+            position: CGPoint(x: 100, y: 0),
+            data: "Draft",
+            phase: .draft(.neutral),
+            persistence: .transient
+        ))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "draft"))
+
+        let doc = store.export()
+        #expect(doc.nodes.count == 1)
+        #expect(doc.nodes.first?.id == "n1")
+        #expect(doc.edges.isEmpty)
+    }
+
     @Test("Load resets hoveredNodeID")
     func loadResetsHovered() {
         let store = FlowStore<String>()
@@ -248,6 +267,26 @@ struct FlowStoreTests {
         store.load(doc)
         #expect(store.hoveredNodeID == nil)
         #expect(store.nodes.allSatisfy { !$0.isHovered })
+    }
+
+    @Test("Load clears connection draft")
+    func loadClearsConnectionDraft() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 100, y: 0), data: "B"))
+        store.connectionDraft = ConnectionDraft(
+            sourceNodeID: "n1",
+            sourceHandleID: "source",
+            sourceHandleType: .source,
+            sourceHandlePosition: .right,
+            targetNodeID: "n2",
+            targetHandleID: "target",
+            currentPoint: CGPoint(x: 40, y: 20)
+        )
+
+        store.load(store.export())
+
+        #expect(store.connectionDraft == nil)
     }
 
     // MARK: - Viewport
@@ -700,11 +739,20 @@ struct FlowStoreTests {
         #expect(store.connectionDraft != nil)
         #expect(store.connectionDraft?.sourceHandlePosition == .right)
 
-        store.updateConnection(to: CGPoint(x: 100, y: 100))
+        store.updateConnection(to: CGPoint(x: 100, y: 100), targetNodeID: "n2", targetHandleID: "in")
         #expect(store.connectionDraft?.currentPoint == CGPoint(x: 100, y: 100))
+        #expect(store.connectionDraft?.targetNodeID == "n2")
+        #expect(store.connectionDraft?.targetHandleID == "in")
 
         store.cancelConnection()
         #expect(store.connectionDraft == nil)
+    }
+
+    @Test("FlowNode defaults to normal persistent state")
+    func flowNodeDefaultPhaseAndPersistence() {
+        let node = FlowNode(id: "n1", position: .zero, data: "Test")
+        #expect(node.phase == .normal)
+        #expect(node.persistence == .persistent)
     }
 
     // MARK: - HandleDeclaration

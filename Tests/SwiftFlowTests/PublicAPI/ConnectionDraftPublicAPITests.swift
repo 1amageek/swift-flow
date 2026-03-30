@@ -14,6 +14,8 @@ struct ConnectionDraftPublicAPITests {
             sourceHandleID: "out",
             sourceHandleType: .source,
             sourceHandlePosition: .right,
+            targetNodeID: "n2",
+            targetHandleID: "in",
             currentPoint: CGPoint(x: 120, y: 80)
         )
 
@@ -21,6 +23,8 @@ struct ConnectionDraftPublicAPITests {
 
         #expect(store.connectionDraft?.sourceNodeID == "n1")
         #expect(store.connectionDraft?.sourceHandleID == "out")
+        #expect(store.connectionDraft?.targetNodeID == "n2")
+        #expect(store.connectionDraft?.targetHandleID == "in")
         #expect(store.connectionDraft?.currentPoint == CGPoint(x: 120, y: 80))
     }
 }

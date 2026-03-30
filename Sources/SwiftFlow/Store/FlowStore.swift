@@ -100,6 +100,15 @@ public final class FlowStore<Data: Sendable & Hashable> {
         if hoveredNodeID == nodeID {
             hoveredNodeID = nil
         }
+        if dropTargetNodeID == nodeID {
+            dropTargetNodeID = nil
+        }
+        if connectionDraft?.sourceNodeID == nodeID {
+            connectionDraft = nil
+        } else if connectionDraft?.targetNodeID == nodeID {
+            connectionDraft?.targetNodeID = nil
+            connectionDraft?.targetHandleID = nil
+        }
 
         edges.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
         rebuildConnectionLookup()
@@ -830,12 +839,16 @@ public final class FlowStore<Data: Sendable & Hashable> {
             sourceHandleID: handleID,
             sourceHandleType: handleType,
             sourceHandlePosition: handlePosition,
+            targetNodeID: nil,
+            targetHandleID: nil,
             currentPoint: .zero
         )
     }
 
-    func updateConnection(to point: CGPoint) {
+    func updateConnection(to point: CGPoint, targetNodeID: String? = nil, targetHandleID: String? = nil) {
         connectionDraft?.currentPoint = point
+        connectionDraft?.targetNodeID = targetNodeID
+        connectionDraft?.targetHandleID = targetHandleID
     }
 
     func endConnection(targetNodeID: String, targetHandleID: String?) {
@@ -1060,6 +1073,8 @@ public struct ConnectionDraft {
     public var sourceHandleID: String?
     public var sourceHandleType: HandleType
     public var sourceHandlePosition: HandlePosition
+    public var targetNodeID: String?
+    public var targetHandleID: String?
     public var currentPoint: CGPoint
 
     public init(
@@ -1067,12 +1082,16 @@ public struct ConnectionDraft {
         sourceHandleID: String?,
         sourceHandleType: HandleType,
         sourceHandlePosition: HandlePosition,
+        targetNodeID: String? = nil,
+        targetHandleID: String? = nil,
         currentPoint: CGPoint
     ) {
         self.sourceNodeID = sourceNodeID
         self.sourceHandleID = sourceHandleID
         self.sourceHandleType = sourceHandleType
         self.sourceHandlePosition = sourceHandlePosition
+        self.targetNodeID = targetNodeID
+        self.targetHandleID = targetHandleID
         self.currentPoint = currentPoint
     }
 }
@@ -1081,7 +1100,7 @@ public struct ConnectionDraft {
 
 struct HandleHitResult {
     let nodeID: String
-    let handleID: String
+    let handleID: String?
     let handleType: HandleType
     let handlePosition: HandlePosition
 }
@@ -1091,13 +1110,16 @@ struct HandleHitResult {
 extension FlowStore where Data: Codable {
 
     public func export() -> FlowDocument<Data> {
-        var exportedNodes = nodes
+        var exportedNodes = nodes.filter { $0.persistence == .persistent }
         for index in exportedNodes.indices {
             exportedNodes[index].isSelected = false
             exportedNodes[index].isHovered = false
             exportedNodes[index].isDraggable = true
         }
-        var exportedEdges = edges
+        let exportedNodeIDs = Set(exportedNodes.map(\.id))
+        var exportedEdges = edges.filter {
+            exportedNodeIDs.contains($0.sourceNodeID) && exportedNodeIDs.contains($0.targetNodeID)
+        }
         for index in exportedEdges.indices {
             exportedEdges[index].isSelected = false
         }
@@ -1123,6 +1145,10 @@ extension FlowStore where Data: Codable {
         self.selectedEdgeIDs = []
         self.animatedEdgeIDs = []
         self.hoveredNodeID = nil
+        self.dropTargetNodeID = nil
+        self.dropTargetEdgeID = nil
+        self.connectionDraft = nil
+        self.selectionRect = nil
         rebuildNodeLookup()
 
         // Filter out edges with duplicate IDs or dangling node references

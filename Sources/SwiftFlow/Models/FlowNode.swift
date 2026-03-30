@@ -1,11 +1,37 @@
 import CoreGraphics
 
+public enum DraftPresentationState: String, Codable, Sendable, Hashable {
+    case neutral
+    case valid
+    case invalid
+}
+
+public enum FlowNodePhase: Codable, Sendable, Hashable {
+    case normal
+    case draft(DraftPresentationState)
+}
+
+public enum NodePersistence: String, Codable, Sendable, Hashable {
+    case persistent
+    case transient
+}
+
+public struct NodeRenderContext: Sendable, Hashable {
+    public let connectedHandleID: String?
+
+    public init(connectedHandleID: String? = nil) {
+        self.connectedHandleID = connectedHandleID
+    }
+}
+
 public struct FlowNode<Data: Sendable & Hashable>: Identifiable, Sendable, Hashable {
 
     public let id: String
     public var position: CGPoint
     public var size: CGSize
     public var data: Data
+    public var phase: FlowNodePhase
+    public var persistence: NodePersistence
     public var isSelected: Bool
     public var isHovered: Bool
     public var isDropTarget: Bool
@@ -18,6 +44,8 @@ public struct FlowNode<Data: Sendable & Hashable>: Identifiable, Sendable, Hasha
         position: CGPoint,
         size: CGSize = CGSize(width: 150, height: 60),
         data: Data,
+        phase: FlowNodePhase = .normal,
+        persistence: NodePersistence = .persistent,
         isSelected: Bool = false,
         isDraggable: Bool = true,
         zIndex: Int = 0,
@@ -30,6 +58,8 @@ public struct FlowNode<Data: Sendable & Hashable>: Identifiable, Sendable, Hasha
         self.position = position
         self.size = size
         self.data = data
+        self.phase = phase
+        self.persistence = persistence
         self.isSelected = isSelected
         self.isHovered = false
         self.isDropTarget = false
@@ -46,7 +76,7 @@ public struct FlowNode<Data: Sendable & Hashable>: Identifiable, Sendable, Hasha
 extension FlowNode: Codable where Data: Codable {
 
     private enum CodingKeys: String, CodingKey {
-        case id, position, size, data, isSelected, isDraggable, zIndex, handles
+        case id, position, size, data, phase, persistence, isSelected, isDraggable, zIndex, handles
     }
 
     public init(from decoder: Decoder) throws {
@@ -55,6 +85,8 @@ extension FlowNode: Codable where Data: Codable {
         position = try container.decode(CGPoint.self, forKey: .position)
         size = try container.decode(CGSize.self, forKey: .size)
         data = try container.decode(Data.self, forKey: .data)
+        phase = try container.decodeIfPresent(FlowNodePhase.self, forKey: .phase) ?? .normal
+        persistence = try container.decodeIfPresent(NodePersistence.self, forKey: .persistence) ?? .persistent
         isSelected = try container.decodeIfPresent(Bool.self, forKey: .isSelected) ?? false
         isHovered = false
         isDropTarget = false
@@ -72,6 +104,8 @@ extension FlowNode: Codable where Data: Codable {
         try container.encode(position, forKey: .position)
         try container.encode(size, forKey: .size)
         try container.encode(data, forKey: .data)
+        try container.encode(phase, forKey: .phase)
+        try container.encode(persistence, forKey: .persistence)
         try container.encode(isSelected, forKey: .isSelected)
         try container.encode(isDraggable, forKey: .isDraggable)
         try container.encode(zIndex, forKey: .zIndex)

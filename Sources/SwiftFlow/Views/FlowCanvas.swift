@@ -1212,6 +1212,86 @@ private struct PreviewNode: View {
     }
 }
 
+@MainActor
+@Observable
+private final class PreviewInteractionState {
+    var lastEvent: String = "Double-tap empty canvas, drag into Notify to see rejection, or inject a draft."
+    var lastCanvasDoubleTap: String = "Not yet"
+    var lastRejectedConnection: String = "Drag any output into Notify"
+    var draftStatus: String = "Hidden"
+}
+
+private struct PreviewConnectionValidator: ConnectionValidating {
+    func validate(_ proposal: ConnectionProposal) -> Bool {
+        guard DefaultConnectionValidator().validate(proposal) else { return false }
+        return proposal.targetNodeID != "notify" || proposal.sourceNodeID == "format"
+    }
+}
+
+private struct PreviewStatusPanel: View {
+    let interaction: PreviewInteractionState
+    let toggleDraft: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Preview Checks")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+
+            Text(interaction.lastEvent)
+                .font(.caption)
+                .foregroundStyle(.primary)
+
+            statusRow("Canvas Double-Tap", interaction.lastCanvasDoubleTap)
+            statusRow("Rejected Connection", interaction.lastRejectedConnection)
+            statusRow("Programmatic Draft", interaction.draftStatus)
+            statusRow("Handle Size", "\(Int(FlowHandle.diameter))pt")
+            statusRow("Platform", platformNote)
+
+            Button(action: toggleDraft) {
+                Label(
+                    interaction.draftStatus == "Visible" ? "Clear Draft" : "Inject Draft",
+                    systemImage: interaction.draftStatus == "Visible" ? "xmark.circle" : "point.3.connected.trianglepath.dotted"
+                )
+                .font(.caption)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(12)
+        .frame(width: 310, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var platformNote: String {
+        #if os(macOS)
+        "Command-click multi-select available"
+        #else
+        "iOS build excludes command-click path"
+        #endif
+    }
+
+    private func statusRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.bold())
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+        }
+    }
+}
+
+private func previewPointText(_ point: CGPoint) -> String {
+    "x: \(Int(point.x.rounded())), y: \(Int(point.y.rounded()))"
+}
+
+private func previewProposalText(_ proposal: ConnectionProposal) -> String {
+    "\(proposal.sourceNodeID) -> \(proposal.targetNodeID)"
+}
+
 #Preview("FlowCanvas") {
     @Previewable @State var store: FlowStore<PreviewNodeData> = {
         let hOut: [HandleDeclaration] = [
@@ -1279,7 +1359,8 @@ private struct PreviewNode: View {
                 FlowEdge(id: "e16", sourceNodeID: "format", sourceHandleID: "out", targetNodeID: "notify", targetHandleID: "in"),
             ],
             configuration: FlowConfiguration(
-                backgroundStyle: BackgroundStyle(pattern: .dot)
+                backgroundStyle: BackgroundStyle(pattern: .dot),
+                connectionValidator: PreviewConnectionValidator()
             )
         )
         // Animate entry edges to show dash phase
@@ -1297,6 +1378,7 @@ private struct PreviewNode: View {
         }
         return store
     }()
+    @Previewable @State var interaction = PreviewInteractionState()
     GeometryReader { geometry in
         ZStack {
             FlowCanvas(store: store) { node in
@@ -1427,6 +1509,26 @@ private struct PreviewNode: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(12)
 
+            PreviewStatusPanel(interaction: interaction) {
+                if store.connectionDraft == nil {
+                    store.connectionDraft = ConnectionDraft(
+                        sourceNodeID: "router",
+                        sourceHandleID: "out",
+                        sourceHandleType: .source,
+                        sourceHandlePosition: .right,
+                        currentPoint: store.viewport.canvasToScreen(CGPoint(x: 640, y: 430))
+                    )
+                    interaction.draftStatus = "Visible"
+                    interaction.lastEvent = "Injected a connection draft from app state."
+                } else {
+                    store.connectionDraft = nil
+                    interaction.draftStatus = "Hidden"
+                    interaction.lastEvent = "Cleared the injected connection draft."
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .padding(12)
+
             VStack(alignment: .trailing, spacing: 8) {
                 MiniMap(store: store, canvasSize: geometry.size)
 
@@ -1436,6 +1538,26 @@ private struct PreviewNode: View {
             .padding(12)
         }
         .onAppear {
+            store.onConnect = { [weak store, interaction] proposal in
+                guard let store else { return }
+                interaction.lastEvent = "Connected \(previewProposalText(proposal))."
+                let edge = FlowEdge(
+                    id: "e-\(UUID().uuidString.prefix(8))",
+                    sourceNodeID: proposal.sourceNodeID,
+                    sourceHandleID: proposal.sourceHandleID,
+                    targetNodeID: proposal.targetNodeID,
+                    targetHandleID: proposal.targetHandleID
+                )
+                store.addEdge(edge)
+            }
+            store.onCanvasDoubleTap = { [interaction] point in
+                interaction.lastCanvasDoubleTap = previewPointText(point)
+                interaction.lastEvent = "Canvas double-tapped at \(previewPointText(point))."
+            }
+            store.onConnectionRejected = { [interaction] proposal in
+                interaction.lastRejectedConnection = previewProposalText(proposal)
+                interaction.lastEvent = "Rejected \(previewProposalText(proposal))."
+            }
             store.fitToContent(canvasSize: geometry.size)
         }
     }

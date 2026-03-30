@@ -15,7 +15,7 @@ Edges are batch-drawn via `GraphicsContext` for performance. Nodes are rendered 
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.1.0")
+    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.4.0")
 ]
 ```
 
@@ -137,12 +137,12 @@ The main view. It accepts `@ViewBuilder` closures for customizing node and edge 
 FlowCanvas(store: store)
 
 // Custom nodes
-FlowCanvas(store: store) { node in
+FlowCanvas(store: store) { node, context in
     MyNodeView(node: node)
 }
 
 // Custom nodes + custom edges
-FlowCanvas(store: store) { node in
+FlowCanvas(store: store) { node, context in
     MyNodeView(node: node)
 } edgeContent: { edge, geometry in
     geometry.path.stroke(edge.isSelected ? .blue : .gray, lineWidth: 2)
@@ -159,7 +159,7 @@ FlowCanvas(store: store, edgeContent: { edge, geometry in
 Provide a `@ViewBuilder` closure to `FlowCanvas` that returns any SwiftUI view for each node:
 
 ```swift
-FlowCanvas(store: store) { node in
+FlowCanvas(store: store) { node, context in
     VStack(spacing: 4) {
         Text(node.data.title)
             .font(.caption.bold())
@@ -197,7 +197,7 @@ Key points for custom nodes:
 You can also switch between different node views based on the data:
 
 ```swift
-FlowCanvas(store: store) { node in
+FlowCanvas(store: store) { node, context in
     switch node.data {
     case .trigger: TriggerNodeView(node: node)
     case .logic:   LogicNodeView(node: node)
@@ -211,8 +211,8 @@ FlowCanvas(store: store) { node in
 Provide an `edgeContent` closure to render each edge as a SwiftUI view. The closure receives a `FlowEdge` and an `EdgeGeometry` with pre-computed path and position data in local coordinates.
 
 ```swift
-FlowCanvas(store: store) { node in
-    DefaultNodeContent(node: node)
+FlowCanvas(store: store) { node, context in
+    DefaultNodeContent(node: node, context: context)
 } edgeContent: { edge, geometry in
     geometry.path.stroke(
         edge.isSelected ? Color.blue : Color.gray,
@@ -384,7 +384,7 @@ store.updateEdge("edge-1") { edge in   // update structural properties (register
     edge.pathType = .smoothStep
     edge.label = "Updated"
 }
-store.updateEdges(["e1", "e2"]) { edge in  // batch update (single undo entry)
+store.updateEdges { edge in                // batch update (single undo entry)
     edge.pathType = .straight
 }
 ```
@@ -475,10 +475,10 @@ store.load(document)
 Enable drag-and-drop onto the canvas, nodes, and edges using the `dropDestination(for:action:)` modifier.
 
 ```swift
-FlowCanvas(store: store) { node in
+FlowCanvas(store: store) { node, context in
     MyNodeView(node: node)
 }
-.dropDestination(for: [.json]) { phase in
+.dropDestination(for: [UTType.json]) { phase in
     switch phase {
     case .updated(let providers, let location, let target):
         // Called continuously during drag hover.
@@ -526,7 +526,7 @@ FlowCanvas(store: store) { node in
 Nodes and edges have an `isDropTarget: Bool` property that the library manages automatically based on the `Bool` you return from `.updated`. Use this in custom node views:
 
 ```swift
-FlowCanvas(store: store) { node in
+FlowCanvas(store: store) { node, context in
     RoundedRectangle(cornerRadius: 8)
         .fill(node.isDropTarget ? Color.accentColor.opacity(0.1) : Color(.systemBackground))
         .overlay {
@@ -547,7 +547,7 @@ Attach floating views near selected nodes or edges. Accessory views appear/disap
 ### Node Accessory
 
 ```swift
-FlowCanvas(store: store) { node in
+FlowCanvas(store: store) { node, context in
     MyNodeView(node: node)
 }
 .nodeAccessory { node in

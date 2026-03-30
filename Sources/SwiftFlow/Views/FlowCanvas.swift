@@ -1403,6 +1403,7 @@ private final class PreviewInteractionState {
     var lastRejectedConnection: String = "Drag any output into Notify"
     var draftStatus: String = "Hidden"
     var draftTarget: String = "No target"
+    var edgePathStyle: String = "Bezier"
 }
 
 private struct PreviewConnectionValidator: ConnectionValidating {
@@ -1418,6 +1419,7 @@ private struct PreviewStatusPanel: View {
     let cycleDraftState: () -> Void
     let toggleDraftTarget: () -> Void
     let commitDraft: () -> Void
+    let cycleEdgePathStyle: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1434,6 +1436,7 @@ private struct PreviewStatusPanel: View {
             statusRow("Rejected Connection", interaction.lastRejectedConnection)
             statusRow("Draft Node", interaction.draftStatus)
             statusRow("Draft Target", interaction.draftTarget)
+            statusRow("Edge Path", interaction.edgePathStyle)
 
             HStack(spacing: 6) {
                 Button(action: toggleDraft) {
@@ -1468,6 +1471,13 @@ private struct PreviewStatusPanel: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(interaction.draftStatus == "Hidden" || interaction.draftStatus.hasPrefix("Normal"))
+
+            Button(action: cycleEdgePathStyle) {
+                Label("Path", systemImage: "arrow.triangle.swap")
+                    .font(.caption2)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
 
             statusRow("Handle", "\(Int(FlowHandle.diameter))pt")
             statusRow("Platform", platformNote)
@@ -1532,6 +1542,32 @@ private func previewDraftStatusText(_ node: FlowNode<PreviewNodeData>?) -> Strin
     guard let node else { return "Hidden" }
     let scope = node.persistence == .persistent ? "Persistent" : "Transient"
     return "\(previewDraftPhaseText(node.phase)) · \(scope)"
+}
+
+private func previewEdgePathStyleText(_ pathType: EdgePathType) -> String {
+    switch pathType {
+    case .bezier:
+        return "Bezier"
+    case .straight:
+        return "Straight"
+    case .smoothStep:
+        return "Right Angle"
+    case .simpleBezier:
+        return "Simple Bezier"
+    }
+}
+
+private func previewNextEdgePathType(after pathType: EdgePathType) -> EdgePathType {
+    switch pathType {
+    case .bezier:
+        return .straight
+    case .straight:
+        return .smoothStep
+    case .smoothStep:
+        return .simpleBezier
+    case .simpleBezier:
+        return .bezier
+    }
 }
 
 private func makePreviewDraftNode(phase: FlowNodePhase) -> FlowNode<PreviewNodeData> {
@@ -1635,7 +1671,8 @@ private func makePreviewDraftNode(phase: FlowNodePhase) -> FlowNode<PreviewNodeD
                 sourceNodeID: proposal.sourceNodeID,
                 sourceHandleID: proposal.sourceHandleID,
                 targetNodeID: proposal.targetNodeID,
-                targetHandleID: proposal.targetHandleID
+                targetHandleID: proposal.targetHandleID,
+                pathType: store.configuration.defaultEdgePathType
             )
             store.addEdge(edge)
         }
@@ -1877,6 +1914,15 @@ private func makePreviewDraftNode(phase: FlowNodePhase) -> FlowNode<PreviewNodeD
                     interaction.draftStatus = previewDraftStatusText(store.nodeLookup[previewDraftNodeID])
                     interaction.draftTarget = "No target"
                     interaction.lastEvent = "Committed the draft node and cleared the draft edge."
+                },
+                cycleEdgePathStyle: {
+                    let nextPathType = previewNextEdgePathType(after: store.configuration.defaultEdgePathType)
+                    store.configuration.defaultEdgePathType = nextPathType
+                    store.updateEdges { edge in
+                        edge.pathType = nextPathType
+                    }
+                    interaction.edgePathStyle = previewEdgePathStyleText(nextPathType)
+                    interaction.lastEvent = "Switched all edges to \(previewEdgePathStyleText(nextPathType))."
                 }
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -1899,7 +1945,8 @@ private func makePreviewDraftNode(phase: FlowNodePhase) -> FlowNode<PreviewNodeD
                     sourceNodeID: proposal.sourceNodeID,
                     sourceHandleID: proposal.sourceHandleID,
                     targetNodeID: proposal.targetNodeID,
-                    targetHandleID: proposal.targetHandleID
+                    targetHandleID: proposal.targetHandleID,
+                    pathType: store.configuration.defaultEdgePathType
                 )
                 store.addEdge(edge)
             }
@@ -1918,6 +1965,7 @@ private func makePreviewDraftNode(phase: FlowNodePhase) -> FlowNode<PreviewNodeD
                 store.connectionDraft == nil
                 ? "No target"
                 : previewDraftTargetText(store.connectionDraft?.targetHandleID)
+            interaction.edgePathStyle = previewEdgePathStyleText(store.configuration.defaultEdgePathType)
             store.fitToContent(canvasSize: geometry.size)
         }
     }

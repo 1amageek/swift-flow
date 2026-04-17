@@ -284,4 +284,128 @@ struct FlowStoreUndoTests {
         undoManager.undo()
         #expect(store.edges.count == 1)
     }
+
+    // MARK: - completeResizeNodes Undo/Redo
+
+    @Test("Undo completeResizeNodes restores size only")
+    func undoResizeSizeOnly() {
+        let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(
+            id: "n1",
+            position: CGPoint(x: 10, y: 20),
+            size: CGSize(width: 100, height: 50),
+            data: "A"
+        ))
+        store.undoManager = undoManager
+
+        let startFrames = ["n1": CGRect(x: 10, y: 20, width: 100, height: 50)]
+        store.updateNodeSize("n1", size: CGSize(width: 200, height: 80))
+        store.completeResizeNodes(from: startFrames)
+        #expect(store.nodeLookup["n1"]?.size == CGSize(width: 200, height: 80))
+
+        undoManager.undo()
+        #expect(store.nodeLookup["n1"]?.size == CGSize(width: 100, height: 50))
+        #expect(store.nodeLookup["n1"]?.position == CGPoint(x: 10, y: 20))
+    }
+
+    @Test("Undo completeResizeNodes restores position and size together")
+    func undoResizePositionAndSize() {
+        let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(
+            id: "n1",
+            position: CGPoint(x: 10, y: 20),
+            size: CGSize(width: 100, height: 50),
+            data: "A"
+        ))
+        store.undoManager = undoManager
+
+        let startFrames = ["n1": CGRect(x: 10, y: 20, width: 100, height: 50)]
+        store.updateNode("n1") { node in
+            node.position = CGPoint(x: 40, y: 60)
+            node.size = CGSize(width: 70, height: 10)
+        }
+        store.completeResizeNodes(from: startFrames)
+
+        undoManager.undo()
+        #expect(store.nodeLookup["n1"]?.position == CGPoint(x: 10, y: 20))
+        #expect(store.nodeLookup["n1"]?.size == CGSize(width: 100, height: 50))
+    }
+
+    @Test("Undo completeResizeNodes restores multiple nodes in a single entry")
+    func undoResizeMultipleNodes() {
+        let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(
+            id: "n1",
+            position: CGPoint(x: 0, y: 0),
+            size: CGSize(width: 100, height: 50),
+            data: "A"
+        ))
+        store.addNode(FlowNode(
+            id: "n2",
+            position: CGPoint(x: 200, y: 0),
+            size: CGSize(width: 100, height: 50),
+            data: "B"
+        ))
+        store.undoManager = undoManager
+
+        let startFrames: [String: CGRect] = [
+            "n1": CGRect(x: 0, y: 0, width: 100, height: 50),
+            "n2": CGRect(x: 200, y: 0, width: 100, height: 50)
+        ]
+        store.updateNodeSize("n1", size: CGSize(width: 300, height: 50))
+        store.updateNode("n2") { node in
+            node.position = CGPoint(x: 210, y: 10)
+            node.size = CGSize(width: 80, height: 40)
+        }
+        store.completeResizeNodes(from: startFrames)
+
+        undoManager.undo()
+        #expect(store.nodeLookup["n1"]?.frame == startFrames["n1"])
+        #expect(store.nodeLookup["n2"]?.frame == startFrames["n2"])
+    }
+
+    @Test("completeResizeNodes is no-op when frames unchanged")
+    func resizeNodesNoChange() {
+        let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(
+            id: "n1",
+            position: CGPoint(x: 10, y: 20),
+            size: CGSize(width: 100, height: 50),
+            data: "A"
+        ))
+        store.undoManager = undoManager
+
+        let startFrames = ["n1": CGRect(x: 10, y: 20, width: 100, height: 50)]
+        store.completeResizeNodes(from: startFrames)
+        #expect(!undoManager.canUndo)
+    }
+
+    @Test("Redo completeResizeNodes re-applies final frame")
+    func redoResize() {
+        let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(
+            id: "n1",
+            position: CGPoint(x: 10, y: 20),
+            size: CGSize(width: 100, height: 50),
+            data: "A"
+        ))
+        store.undoManager = undoManager
+
+        let startFrames = ["n1": CGRect(x: 10, y: 20, width: 100, height: 50)]
+        store.updateNode("n1") { node in
+            node.position = CGPoint(x: 40, y: 60)
+            node.size = CGSize(width: 70, height: 10)
+        }
+        store.completeResizeNodes(from: startFrames)
+
+        undoManager.undo()
+        undoManager.redo()
+        #expect(store.nodeLookup["n1"]?.position == CGPoint(x: 40, y: 60))
+        #expect(store.nodeLookup["n1"]?.size == CGSize(width: 70, height: 10))
+    }
 }

@@ -44,6 +44,11 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var undoManager: UndoManager?
     private var isUndoRegistrationDisabled = false
 
+    // MARK: - Interactive Updates
+
+    private var isInteractiveUpdateActive = false
+    private var pendingNodeChanges: [NodeChange<Data>] = []
+
     // MARK: - Callbacks
 
     public var onNodesChange: (([NodeChange<Data>]) -> Void)?
@@ -80,7 +85,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         nodes.append(node)
         nodeLookup[node.id] = node
         rebuildSortedNodes()
-        onNodesChange?([.add(node)])
+        emitNodeChange(.add(node))
         let captured = node
         registerUndo(actionName: "Add") { store in
             store.removeNode(captured.id)
@@ -118,7 +123,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
             animatedEdgeIDs.remove(edge.id)
         }
 
-        onNodesChange?([.remove(nodeID: nodeID)])
+        emitNodeChange(.remove(nodeID: nodeID))
         if !cascadedEdges.isEmpty {
             onEdgesChange?(cascadedEdges.map { .remove(edgeID: $0.id) })
         }
@@ -144,21 +149,21 @@ public final class FlowStore<Data: Sendable & Hashable> {
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
         nodes[index].position = snapped
         nodeLookup[nodeID] = nodes[index]
-        onNodesChange?([.position(nodeID: nodeID, position: snapped)])
+        emitNodeChange(.position(nodeID: nodeID, position: snapped))
     }
 
     public func updateNode(_ nodeID: String, _ transform: (inout FlowNode<Data>) -> Void) {
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
         transform(&nodes[index])
         nodeLookup[nodeID] = nodes[index]
-        onNodesChange?([.replace(nodes[index])])
+        emitNodeChange(.replace(nodes[index]))
     }
 
     public func updateNodeSize(_ nodeID: String, size: CGSize) {
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
         nodes[index].size = size
         nodeLookup[nodeID] = nodes[index]
-        onNodesChange?([.dimensions(nodeID: nodeID, size: size)])
+        emitNodeChange(.dimensions(nodeID: nodeID, size: size))
     }
 
     // MARK: - Move Completion (Undo)
@@ -181,6 +186,40 @@ public final class FlowStore<Data: Sendable & Hashable> {
                 store.moveNode(nodeID, to: pos)
             }
             store.registerMoveUndo(from: to, to: from)
+        }
+    }
+
+    // MARK: - Resize Completion (Undo)
+
+    /// Register a single undo entry for a completed resize operation.
+    ///
+    /// Call this at the end of an interactive resize drag. The snapshot dict maps
+    /// nodeID to the node's frame (origin + size) at the start of the drag.
+    /// Any combination of position and size differences is captured in a single
+    /// undo entry, so corner-drag resizes that move the origin are covered.
+    public func completeResizeNodes(from startFrames: [String: CGRect]) {
+        var endFrames: [String: CGRect] = [:]
+        for (nodeID, _) in startFrames {
+            if let node = nodeLookup[nodeID] {
+                endFrames[nodeID] = node.frame
+            }
+        }
+        let changed = startFrames.contains { id, rect in endFrames[id] != rect }
+        guard changed else { return }
+        registerResizeUndo(from: startFrames, to: endFrames)
+    }
+
+    private func registerResizeUndo(from: [String: CGRect], to: [String: CGRect]) {
+        registerUndo(actionName: "Resize") { store in
+            store.withoutUndoRegistration {
+                for (nodeID, rect) in from {
+                    store.updateNode(nodeID) { node in
+                        node.position = rect.origin
+                        node.size = rect.size
+                    }
+                }
+            }
+            store.registerResizeUndo(from: to, to: from)
         }
     }
 
@@ -381,7 +420,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         if let index = nodes.firstIndex(where: { $0.id == nodeID }) {
             nodes[index].isSelected = true
             nodeLookup[nodeID] = nodes[index]
-            onNodesChange?([.select(nodeID: nodeID, isSelected: true)])
+            emitNodeChange(.select(nodeID: nodeID, isSelected: true))
         }
     }
 
@@ -390,7 +429,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         if let index = nodes.firstIndex(where: { $0.id == nodeID }) {
             nodes[index].isSelected = false
             nodeLookup[nodeID] = nodes[index]
-            onNodesChange?([.select(nodeID: nodeID, isSelected: false)])
+            emitNodeChange(.select(nodeID: nodeID, isSelected: false))
         }
     }
 
@@ -434,7 +473,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         selectedNodeIDs.removeAll()
         selectedEdgeIDs.removeAll()
 
-        if !nodeChanges.isEmpty { onNodesChange?(nodeChanges) }
+        if !nodeChanges.isEmpty { emitNodeChanges(nodeChanges) }
         if !edgeChanges.isEmpty { onEdgesChange?(edgeChanges) }
     }
 
@@ -481,7 +520,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         }
         selectedEdgeIDs = newSelectedEdgeIDs
 
-        if !nodeChanges.isEmpty { onNodesChange?(nodeChanges) }
+        if !nodeChanges.isEmpty { emitNodeChanges(nodeChanges) }
         if !edgeChanges.isEmpty { onEdgesChange?(edgeChanges) }
     }
 
@@ -1018,6 +1057,47 @@ public final class FlowStore<Data: Sendable & Hashable> {
         isUndoRegistrationDisabled = true
         body()
         isUndoRegistrationDisabled = previous
+    }
+
+    // MARK: - Interactive Updates (Public)
+
+    /// Begin an interactive update session. While active, node change callbacks
+    /// (`onNodesChange`) are accumulated instead of fired per-operation. Call
+    /// `endInteractiveUpdates()` to flush the accumulated changes as a single
+    /// batch. Useful during drag operations that mutate nodes every frame.
+    ///
+    /// Nested begin/end pairs are not supported; a second `begin` call while
+    /// already active simply keeps the session open.
+    public func beginInteractiveUpdates() {
+        isInteractiveUpdateActive = true
+    }
+
+    /// End an interactive update session started with `beginInteractiveUpdates()`.
+    /// Fires `onNodesChange` once with all accumulated changes in original order,
+    /// then clears the buffer.
+    public func endInteractiveUpdates() {
+        isInteractiveUpdateActive = false
+        guard !pendingNodeChanges.isEmpty else { return }
+        let batched = pendingNodeChanges
+        pendingNodeChanges.removeAll()
+        onNodesChange?(batched)
+    }
+
+    private func emitNodeChange(_ change: NodeChange<Data>) {
+        if isInteractiveUpdateActive {
+            pendingNodeChanges.append(change)
+        } else {
+            onNodesChange?([change])
+        }
+    }
+
+    private func emitNodeChanges(_ changes: [NodeChange<Data>]) {
+        guard !changes.isEmpty else { return }
+        if isInteractiveUpdateActive {
+            pendingNodeChanges.append(contentsOf: changes)
+        } else {
+            onNodesChange?(changes)
+        }
     }
 
     // MARK: - Private

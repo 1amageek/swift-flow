@@ -849,4 +849,53 @@ struct FlowStoreTests {
         #expect(style.selectedLineWidth == 2.5)
         #expect(style.dashPattern.isEmpty)
     }
+
+    // MARK: - Interactive Updates
+
+    @Test("Interactive batch coalesces onNodesChange callbacks")
+    func interactiveBatchCoalesces() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        var callCount = 0
+        var observedChanges: [NodeChange<String>] = []
+        store.onNodesChange = { changes in
+            callCount += 1
+            observedChanges.append(contentsOf: changes)
+        }
+
+        store.beginInteractiveUpdates()
+        for i in 0..<10 {
+            store.moveNode("n1", to: CGPoint(x: CGFloat(i * 10), y: 0))
+        }
+        #expect(callCount == 0)
+        store.endInteractiveUpdates()
+        #expect(callCount == 1)
+        #expect(observedChanges.count == 10)
+    }
+
+    @Test("Interactive batch with no changes emits nothing")
+    func interactiveBatchNoChanges() {
+        let store = FlowStore<String>()
+        var callCount = 0
+        store.onNodesChange = { _ in callCount += 1 }
+
+        store.beginInteractiveUpdates()
+        store.endInteractiveUpdates()
+        #expect(callCount == 0)
+    }
+
+    @Test("Non-interactive mode preserves per-operation callback")
+    func nonInteractivePerOperation() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        var callCount = 0
+        store.onNodesChange = { _ in callCount += 1 }
+
+        for i in 0..<5 {
+            store.moveNode("n1", to: CGPoint(x: CGFloat(i), y: 0))
+        }
+        #expect(callCount == 5)
+    }
 }

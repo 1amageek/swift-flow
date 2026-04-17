@@ -2137,3 +2137,243 @@ private struct DragPalette: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
     }
 }
+
+// MARK: - Resize Preview
+
+private struct ResizablePreviewData: Sendable, Hashable, Codable {
+    var title: String
+    var color: String
+}
+
+private enum ResizeCorner {
+    case topLeft, topRight, bottomLeft, bottomRight
+
+    func apply(startFrame: CGRect, canvasDelta: CGSize, minSize: CGSize) -> CGRect {
+        var x = startFrame.minX
+        var y = startFrame.minY
+        var w = startFrame.width
+        var h = startFrame.height
+        switch self {
+        case .topLeft:
+            x = min(startFrame.minX + canvasDelta.width, startFrame.maxX - minSize.width)
+            y = min(startFrame.minY + canvasDelta.height, startFrame.maxY - minSize.height)
+            w = max(minSize.width, startFrame.width - canvasDelta.width)
+            h = max(minSize.height, startFrame.height - canvasDelta.height)
+        case .topRight:
+            y = min(startFrame.minY + canvasDelta.height, startFrame.maxY - minSize.height)
+            w = max(minSize.width, startFrame.width + canvasDelta.width)
+            h = max(minSize.height, startFrame.height - canvasDelta.height)
+        case .bottomLeft:
+            x = min(startFrame.minX + canvasDelta.width, startFrame.maxX - minSize.width)
+            w = max(minSize.width, startFrame.width - canvasDelta.width)
+            h = max(minSize.height, startFrame.height + canvasDelta.height)
+        case .bottomRight:
+            w = max(minSize.width, startFrame.width + canvasDelta.width)
+            h = max(minSize.height, startFrame.height + canvasDelta.height)
+        }
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+}
+
+private struct ResizeHandleOverlay<Data: Sendable & Hashable>: View {
+    let store: FlowStore<Data>
+    let nodeID: String
+
+    private let handleSize: CGFloat = 10
+    private let minSize = CGSize(width: 40, height: 30)
+
+    @State private var startFrame: CGRect?
+
+    var body: some View {
+        if let node = store.nodeLookup[nodeID] {
+            let frameOnScreen = CGRect(
+                origin: store.viewport.canvasToScreen(node.position),
+                size: CGSize(
+                    width: node.size.width * store.viewport.zoom,
+                    height: node.size.height * store.viewport.zoom
+                )
+            )
+
+            ZStack {
+                Rectangle()
+                    .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                    .frame(width: frameOnScreen.width, height: frameOnScreen.height)
+                    .position(x: frameOnScreen.midX, y: frameOnScreen.midY)
+                    .allowsHitTesting(false)
+
+                handle(at: CGPoint(x: frameOnScreen.minX, y: frameOnScreen.minY), corner: .topLeft)
+                handle(at: CGPoint(x: frameOnScreen.maxX, y: frameOnScreen.minY), corner: .topRight)
+                handle(at: CGPoint(x: frameOnScreen.minX, y: frameOnScreen.maxY), corner: .bottomLeft)
+                handle(at: CGPoint(x: frameOnScreen.maxX, y: frameOnScreen.maxY), corner: .bottomRight)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func handle(at point: CGPoint, corner: ResizeCorner) -> some View {
+        Rectangle()
+            .fill(Color.white)
+            .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 1.5))
+            .frame(width: handleSize, height: handleSize)
+            .position(point)
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { value in
+                        guard let node = store.nodeLookup[nodeID] else { return }
+                        if startFrame == nil {
+                            startFrame = node.frame
+                            store.beginInteractiveUpdates()
+                        }
+                        guard let start = startFrame else { return }
+                        let zoom = store.viewport.zoom
+                        let canvasDelta = CGSize(
+                            width: value.translation.width / zoom,
+                            height: value.translation.height / zoom
+                        )
+                        let newFrame = corner.apply(
+                            startFrame: start,
+                            canvasDelta: canvasDelta,
+                            minSize: minSize
+                        )
+                        store.updateNode(nodeID) { n in
+                            n.position = newFrame.origin
+                            n.size = newFrame.size
+                        }
+                    }
+                    .onEnded { _ in
+                        guard let start = startFrame else { return }
+                        startFrame = nil
+                        store.endInteractiveUpdates()
+                        store.completeResizeNodes(from: [nodeID: start])
+                    }
+            )
+    }
+}
+
+private struct ResizablePreviewNode: View {
+    let node: FlowNode<ResizablePreviewData>
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 10)
+            .fill(color.opacity(0.15))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(color.opacity(0.4), lineWidth: 1)
+            )
+            .overlay {
+                VStack(spacing: 4) {
+                    Text(node.data.title)
+                        .font(.headline)
+                    Text("\(Int(node.size.width)) × \(Int(node.size.height))")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .overlay {
+                ForEach(node.handles, id: \.id) { handle in
+                    FlowHandle(handle.id, type: handle.type, position: handle.position)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment(for: handle.position))
+                }
+            }
+            .frame(width: node.size.width, height: node.size.height)
+    }
+
+    private var color: Color {
+        switch node.data.color {
+        case "blue":   return .blue
+        case "orange": return .orange
+        case "green":  return .green
+        default:       return .gray
+        }
+    }
+
+    private func alignment(for position: HandlePosition) -> Alignment {
+        switch position {
+        case .top:    .top
+        case .bottom: .bottom
+        case .left:   .leading
+        case .right:  .trailing
+        }
+    }
+}
+
+private struct ResizableFlowPreview: View {
+    @State private var store: FlowStore<ResizablePreviewData> = {
+        let s = FlowStore<ResizablePreviewData>(
+            nodes: [
+                FlowNode(
+                    id: "a",
+                    position: CGPoint(x: 60, y: 80),
+                    size: CGSize(width: 180, height: 100),
+                    data: ResizablePreviewData(title: "Input", color: "blue")
+                ),
+                FlowNode(
+                    id: "b",
+                    position: CGPoint(x: 340, y: 140),
+                    size: CGSize(width: 220, height: 140),
+                    data: ResizablePreviewData(title: "Chart", color: "orange")
+                ),
+                FlowNode(
+                    id: "c",
+                    position: CGPoint(x: 660, y: 100),
+                    size: CGSize(width: 160, height: 80),
+                    data: ResizablePreviewData(title: "Output", color: "green")
+                ),
+            ],
+            edges: [
+                FlowEdge(id: "e1", sourceNodeID: "a", sourceHandleID: "source", targetNodeID: "b", targetHandleID: "target"),
+                FlowEdge(id: "e2", sourceNodeID: "b", sourceHandleID: "source", targetNodeID: "c", targetHandleID: "target"),
+            ]
+        )
+        return s
+    }()
+
+    @State private var undoManager = UndoManager()
+    @State private var batchCount = 0
+    @State private var lastBatchSize = 0
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            FlowCanvas(store: store) { node, _ in
+                ResizablePreviewNode(node: node)
+            }
+            .overlay {
+                ForEach(Array(store.selectedNodeIDs), id: \.self) { id in
+                    ResizeHandleOverlay(store: store, nodeID: id)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Interactive Resize Demo").font(.headline)
+                Text("1. Click a node to select  ")
+                Text("2. Drag any corner handle to resize")
+                Divider()
+                HStack(spacing: 12) {
+                    Text("onNodesChange batches: \(batchCount)")
+                    Text("last batch size: \(lastBatchSize)")
+                }
+                .font(.caption.monospaced())
+                HStack(spacing: 8) {
+                    Button("Undo") { undoManager.undo() }
+                        .disabled(!undoManager.canUndo)
+                    Button("Redo") { undoManager.redo() }
+                        .disabled(!undoManager.canRedo)
+                }
+            }
+            .padding(10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .padding(12)
+        }
+        .onAppear {
+            store.undoManager = undoManager
+            store.onNodesChange = { changes in
+                batchCount += 1
+                lastBatchSize = changes.count
+            }
+        }
+    }
+}
+
+#Preview("FlowCanvas - Resize API") {
+    ResizableFlowPreview()
+}

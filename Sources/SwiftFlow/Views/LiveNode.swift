@@ -82,11 +82,16 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
                 .resizable()
                 .interpolation(.high)
         } else {
+            // Placeholder covers two first-frame cases:
+            //   1. Viewport-culled nodes that haven't been hosted by the
+            //      overlay yet (their `liveBody.onAppear` hasn't fired).
+            //   2. Nodes whose `.manual(capture:)` handler is still
+            //      waiting on its native view to become snapshot-ready
+            //      (e.g. WKWebView is still loading the first page).
+            // Seed from here too; `seedSnapshotIfNeeded` guards on the
+            // current snapshot so duplicate `onAppear` calls are no-ops.
             placeholder()
-                .onAppear {
-                    if case .manual = capture { return }
-                    captureNow()
-                }
+                .onAppear { seedSnapshotIfNeeded() }
         }
     }
 
@@ -160,11 +165,28 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
         captureNow()
     }
 
+    /// Ensures the rasterize path has something to draw before the user
+    /// ever activates the node — without it, the first frame after mount
+    /// shows the placeholder until a full hover → unhover cycle completes.
+    ///
+    /// - `.onDeactivation` / `.periodic`: synchronous `ImageRenderer`
+    ///   produces a thumbnail immediately.
+    /// - `.manual(capture:)`: the library can't rasterize native views;
+    ///   kicks off the caller's async handler so they can write the
+    ///   first snapshot as soon as their native view (WKWebView,
+    ///   MKMapView, …) is ready. Subsequent mounts reuse the stored
+    ///   snapshot.
     @MainActor
     private func seedSnapshotIfNeeded() {
-        if case .manual = capture { return }
         guard context.snapshot == nil else { return }
-        captureNow()
+        switch capture {
+        case .onDeactivation, .periodic:
+            captureNow()
+        case .manual(let handler):
+            Task { @MainActor in
+                await handler()
+            }
+        }
     }
 
     @MainActor

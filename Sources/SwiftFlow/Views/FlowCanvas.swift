@@ -2454,14 +2454,35 @@ private final class WebViewBag {
     var webViews: [String: WKWebView] = [:]
 }
 
+/// Bridges `WKNavigationDelegate` into a SwiftUI-friendly callback so
+/// the live node can refresh its snapshot whenever the page finishes
+/// loading — including in-WebView navigations where the user clicks a
+/// link. A short settle delay after `didFinish` lets the final paint
+/// land before `takeSnapshot` reads the surface.
+@MainActor
+private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
+    var onLoadFinished: (@MainActor () -> Void)?
+
+    nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            self?.onLoadFinished?()
+        }
+    }
+}
+
 #if os(iOS)
 private struct WebNodeRepresentable: UIViewRepresentable {
     let nodeID: String
     let url: URL
     let cornerRadius: CGFloat
     let bag: WebViewBag
+    let onLoadFinished: @MainActor () -> Void
+
+    func makeCoordinator() -> WebNodeCoordinator { WebNodeCoordinator() }
 
     func makeUIView(context: Context) -> WKWebView {
+        context.coordinator.onLoadFinished = onLoadFinished
         let wv: WKWebView
         if let existing = bag.webViews[nodeID] {
             existing.removeFromSuperview()
@@ -2471,6 +2492,7 @@ private struct WebNodeRepresentable: UIViewRepresentable {
             wv.load(URLRequest(url: url))
             bag.webViews[nodeID] = wv
         }
+        wv.navigationDelegate = context.coordinator
         wv.layer.cornerRadius = cornerRadius
         wv.layer.masksToBounds = true
         wv.scrollView.layer.cornerRadius = cornerRadius
@@ -2479,6 +2501,7 @@ private struct WebNodeRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.onLoadFinished = onLoadFinished
         uiView.layer.cornerRadius = cornerRadius
         uiView.scrollView.layer.cornerRadius = cornerRadius
     }
@@ -2489,8 +2512,12 @@ private struct WebNodeRepresentable: NSViewRepresentable {
     let url: URL
     let cornerRadius: CGFloat
     let bag: WebViewBag
+    let onLoadFinished: @MainActor () -> Void
+
+    func makeCoordinator() -> WebNodeCoordinator { WebNodeCoordinator() }
 
     func makeNSView(context: Context) -> WKWebView {
+        context.coordinator.onLoadFinished = onLoadFinished
         let wv: WKWebView
         if let existing = bag.webViews[nodeID] {
             existing.removeFromSuperview()
@@ -2500,6 +2527,7 @@ private struct WebNodeRepresentable: NSViewRepresentable {
             wv.load(URLRequest(url: url))
             bag.webViews[nodeID] = wv
         }
+        wv.navigationDelegate = context.coordinator
         wv.wantsLayer = true
         wv.layer?.cornerRadius = cornerRadius
         wv.layer?.masksToBounds = true
@@ -2507,6 +2535,7 @@ private struct WebNodeRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        context.coordinator.onLoadFinished = onLoadFinished
         nsView.layer?.cornerRadius = cornerRadius
     }
 }
@@ -2567,11 +2596,11 @@ private struct LiveOverlayFlowPreview: View {
                         nodeID: nodeID,
                         url: node.data.url,
                         cornerRadius: cornerRadius,
-                        bag: bag
+                        bag: bag,
+                        onLoadFinished: {
+                            Task { await captureSnapshot(nodeID: nodeID) }
+                        }
                     )
-                    .task(id: nodeID) {
-                        await snapshotLoop(nodeID: nodeID)
-                    }
                 } placeholder: {
                     VStack(spacing: 8) {
                         ProgressView()
@@ -2596,22 +2625,13 @@ private struct LiveOverlayFlowPreview: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("WebView Live Node").font(.headline)
                 Text("Hover or select a node to activate the live WKWebView.")
-                Text("Snapshots are captured every second while active; the rasterized path replays the last one.")
+                Text("A fresh WKWebView snapshot is captured on each deactivation and replayed on the rasterized path.")
                     .foregroundStyle(.secondary)
             }
             .font(.caption)
             .padding(10)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
             .padding(12)
-        }
-    }
-
-    @MainActor
-    private func snapshotLoop(nodeID: String) async {
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            if Task.isCancelled { return }
-            await captureSnapshot(nodeID: nodeID)
         }
     }
 

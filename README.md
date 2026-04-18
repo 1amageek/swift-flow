@@ -15,7 +15,7 @@ Edges are batch-drawn via `GraphicsContext` for performance. Nodes are rendered 
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.4.0")
+    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.6.0")
 ]
 ```
 
@@ -202,6 +202,87 @@ FlowCanvas(store: store) { node, context in
     case .trigger: TriggerNodeView(node: node)
     case .logic:   LogicNodeView(node: node)
     case .output:  OutputNodeView(node: node)
+    }
+}
+```
+
+## Live Node Views
+
+The default `Canvas` + `resolveSymbol` pipeline rasterizes each node every frame, which is great for pure SwiftUI content but falls apart for `UIViewRepresentable` / `NSViewRepresentable` subtrees — `WKWebView`, `MKMapView`, `AVPlayerView`, SceneKit / RealityKit hosts, etc. Their rendering loops, scroll views, decoders, and input handling require a real SwiftUI view in the tree; a one-shot rasterization leaves them blank, flickering, or frozen on the first frame.
+
+`LiveNode` is a container you declare once inside `nodeContent`. It transparently switches between a **cached snapshot** (drawn by `Canvas` when the node is inactive) and the **real live view** (hosted in a `ZStack` overlay above the `Canvas` when the node is active), from a single call site.
+
+### Basic Usage (SwiftUI-only)
+
+```swift
+FlowCanvas(store: store) { node, ctx in
+    LiveNode(node: node, context: ctx) {
+        TimelineView(.animation) { tl in
+            ClockFace(date: tl.date)
+        }
+    }
+}
+```
+
+The library seeds a snapshot on first mount and re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path always has something to draw and colors / fonts stay consistent across the active ↔ inactive transition. Handles are drawn automatically.
+
+### Native Views (WKWebView / MKMapView / AVPlayerView)
+
+Native views can't be rendered off-screen by `ImageRenderer`. Use `.manual` capture and write snapshots yourself using the framework-native APIs (`WKWebView.takeSnapshot`, `MKMapSnapshotter`, `AVPlayerItemVideoOutput.copyPixelBuffer`):
+
+```swift
+FlowCanvas(store: store) { node, ctx in
+    LiveNode(node: node, context: ctx, capture: .manual) {
+        WebViewRepresentable(url: node.data.url)
+    } placeholder: {
+        ProgressView()
+    }
+}
+```
+
+```swift
+// App-layer snapshot write
+let image = try await webView.takeSnapshot(configuration: WKSnapshotConfiguration())
+store.setNodeSnapshot(
+    FlowNodeSnapshot(cgImage: image.cgImage!, scale: image.scale),
+    for: nodeID
+)
+```
+
+### Capture Cadence
+
+| `LiveNodeCapture` | Behavior |
+|---|---|
+| `.onDeactivation` *(default)* | Capture once on mount + on each active → inactive transition |
+| `.periodic(TimeInterval)` | Capture at the given interval while active; paused when inactive |
+| `.manual` | Library never captures — required for native views |
+
+### Activation
+
+By default a node is active when it is selected or hovered. Override with `.liveNodeActivation`:
+
+```swift
+.liveNodeActivation { node, store in
+    guard store.connectionDraft == nil else { return false }
+    return store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
+}
+```
+
+The overlay subtree stays mounted across activation toggles so `WKWebView` page state, scroll offset, JS execution, and player state all survive a deactivation — the overlay simply hides via opacity + hit-testing. Apps can pause their own internal loops while the node is hidden by reading the published `\.isFlowNodeActive` environment value:
+
+```swift
+struct WebViewRepresentable: UIViewRepresentable {
+    @Environment(\.isFlowNodeActive) private var isActive
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        let view = WKWebView()
+        view.load(URLRequest(url: url))
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {
+        isActive ? view.resumeAllMediaPlayback() : view.pauseAllMediaPlayback()
     }
 }
 ```
@@ -619,6 +700,7 @@ The library flips placement automatically when the accessory would be clipped by
 │ FlowCanvas<NodeData, NodeView>              │
 │  ├─ Canvas + GraphicsContext (edges)        │
 │  ├─ resolveSymbol (nodes as SwiftUI Views)  │
+│  ├─ LiveNodeOverlay (ZStack, native views)  │
 │  ├─ @ViewBuilder nodeContent closure        │
 │  ├─ @ViewBuilder edgeContent closure (opt)  │
 │  └─ Gesture state machine                   │
@@ -629,6 +711,7 @@ The library flips placement automatically when the accessory would be clipped by
 │  ├─ viewport: Viewport                      │
 │  ├─ selectedNodeIDs / selectedEdgeIDs      │
 │  ├─ animatedEdgeIDs (side-table)           │
+│  ├─ nodeSnapshots (rasterize cache)         │
 │  ├─ nodeLookup / connectionLookup (O(1))   │
 │  └─ hit testing, connection workflow        │
 ├─────────────────────────────────────────────┤

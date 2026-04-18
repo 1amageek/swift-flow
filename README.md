@@ -221,10 +221,13 @@ FlowCanvas(store: store) { node, ctx in
             ClockFace(date: tl.date)
         }
     }
+    .overlay { FlowNodeHandles(node: node, context: ctx) }
 }
 ```
 
-The library seeds a snapshot on first mount and re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path always has something to draw and colors / fonts stay consistent across the active ↔ inactive transition. Handles are drawn automatically.
+The library seeds a snapshot on first mount and re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path always has something to draw and colors / fonts stay consistent across the active ↔ inactive transition.
+
+Handle drawing is the caller's responsibility — identical to the rest of the custom-node rendering path. Use `FlowNodeHandles(node:context:)` for the library default look, or compose `FlowHandle` views directly for fully custom handle styling. `LiveNode` only manages the rasterize ↔ live dispatch and reserves the handle-inset frame so the handles you draw on top aren't clipped.
 
 ### Native Views (WKWebView / MKMapView / AVPlayerView)
 
@@ -237,6 +240,7 @@ FlowCanvas(store: store) { node, ctx in
     } placeholder: {
         ProgressView()
     }
+    .overlay { FlowNodeHandles(node: node, context: ctx) }
 }
 ```
 

@@ -1,21 +1,35 @@
 import SwiftUI
 
-/// Draws a node's handles on top of its content.
+/// Draws a node's handles using the library default styling (circle
+/// `FlowHandle` at each `HandlePosition`, with the connection-draft
+/// target highlighted).
 ///
 /// Expects to sit in a frame sized `node.size + FlowHandle.diameter` on
-/// each axis (i.e. the already-handle-inset frame used by
-/// `DefaultNodeContent` and `LiveNode`). Each handle aligns itself to the
-/// edge indicated by its `HandlePosition`, and reflects the current
-/// connection draft via `context.connectedHandleID`.
+/// each axis — i.e. the handle-inset frame that `FlowCanvas` allocates
+/// to every node symbol and that ``LiveNode`` exposes through its
+/// padding. Place it as a sibling overlay / ZStack child so it fills the
+/// full allotment and each handle snaps to the correct edge:
 ///
-/// Internal: shared between `DefaultNodeContent` and `LiveNode`.
-/// External styling of handles is not part of the public surface yet.
-struct FlowNodeHandles<NodeData: Sendable & Hashable>: View {
+/// ```
+/// LiveNode(node: node, context: ctx) { MyLiveView() }
+///     .overlay { FlowNodeHandles(node: node, context: ctx) }
+/// ```
+///
+/// Apps that want custom handle styling (different shape, colors,
+/// connection-draft presentation, hit region, etc.) should skip this
+/// helper and compose ``FlowHandle`` views directly against
+/// `node.handles`.
+public struct FlowNodeHandles<NodeData: Sendable & Hashable>: View {
 
-    let node: FlowNode<NodeData>
-    let context: NodeRenderContext
+    public let node: FlowNode<NodeData>
+    public let context: NodeRenderContext
 
-    var body: some View {
+    public init(node: FlowNode<NodeData>, context: NodeRenderContext) {
+        self.node = node
+        self.context = context
+    }
+
+    public var body: some View {
         ForEach(node.handles, id: \.id) { handle in
             FlowHandle(handle.id, type: handle.type, position: handle.position)
                 .overlay {

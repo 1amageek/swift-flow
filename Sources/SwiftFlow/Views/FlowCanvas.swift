@@ -2551,6 +2551,7 @@ private struct LiveOverlayFlowPreview: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.secondary.opacity(0.08))
                 }
+                .overlay { FlowNodeHandles(node: node, context: ctx) }
             }
             .liveNodeActivation { node, store in
                 store.selectedNodeIDs.contains(node.id)

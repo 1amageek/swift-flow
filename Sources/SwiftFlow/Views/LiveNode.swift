@@ -4,9 +4,13 @@ import SwiftUI
 /// while the node is active, and as a rasterized snapshot while it is
 /// inactive — all from a single call site.
 ///
-/// Place inside the `nodeContent` closure of `FlowCanvas`. The node's
-/// handles are drawn automatically around the content; callers never
-/// need to lay out handles themselves.
+/// Place inside the `nodeContent` closure of `FlowCanvas`. `LiveNode`
+/// only handles the rasterize ↔ live dispatch and keeps the node sized
+/// to `node.size + FlowHandle.diameter` so handles on the border are not
+/// clipped; **handle drawing is the caller's responsibility**, matching
+/// the rest of the custom-node rendering path. Use
+/// ``FlowNodeHandles`` for the library default styling, or compose raw
+/// ``FlowHandle`` views for fully custom handles.
 ///
 /// ```
 /// FlowCanvas(store: store) { node, ctx in
@@ -15,6 +19,7 @@ import SwiftUI
 ///             ClockFace(date: tl.date)
 ///         }
 ///     }
+///     .overlay { FlowNodeHandles(node: node, context: ctx) }
 /// }
 /// ```
 ///
@@ -52,19 +57,20 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
     }
 
     public var body: some View {
+        // Canvas allocates `node.size + FlowHandle.diameter` per symbol so
+        // handles drawn on the border aren't clipped. `LiveNode` preserves
+        // that allotment here so the overlay layer, rasterized symbol, and
+        // any app-drawn handles share the exact same frame — otherwise the
+        // live ↔ rasterize swap would "pop" by half a handle on every edge.
+        //
+        // Handle drawing itself is the caller's responsibility: the app
+        // may overlay `FlowNodeHandles(node:context:)` for library default
+        // styling, compose raw `FlowHandle` views for custom styling, or
+        // omit handles entirely. `LiveNode` never injects them implicitly.
         let inset = FlowHandle.diameter / 2
-
-        ZStack(alignment: .topLeading) {
-            contentBody
-                .frame(width: node.size.width, height: node.size.height)
-                .padding(inset)
-
-            FlowNodeHandles(node: node, context: context)
-        }
-        .frame(
-            width: node.size.width + inset * 2,
-            height: node.size.height + inset * 2
-        )
+        contentBody
+            .frame(width: node.size.width, height: node.size.height)
+            .padding(inset)
     }
 
     @ViewBuilder

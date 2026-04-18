@@ -6,12 +6,14 @@ import SwiftUI
 ///
 /// Expects to sit in a frame sized `node.size + FlowHandle.diameter` on
 /// each axis — i.e. the handle-inset frame that `FlowCanvas` allocates
-/// to every node symbol and that ``LiveNode`` exposes through its
-/// padding. Place it as a sibling overlay / ZStack child so it fills the
-/// full allotment and each handle snaps to the correct edge:
+/// to every node symbol. `LiveNode` itself does not add this inset, so
+/// the caller composes it with `.padding(FlowHandle.diameter / 2)`
+/// before overlaying these handles:
 ///
 /// ```
 /// LiveNode(node: node, context: ctx) { MyLiveView() }
+///     .frame(width: node.size.width, height: node.size.height)
+///     .padding(FlowHandle.diameter / 2)
 ///     .overlay { FlowNodeHandles(node: node, context: ctx) }
 /// ```
 ///

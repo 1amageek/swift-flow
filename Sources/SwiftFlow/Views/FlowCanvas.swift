@@ -2532,6 +2532,7 @@ private struct LiveOverlayFlowPreview: View {
             // by ImageRenderer, so the app takes WKWebView snapshots
             // itself and writes them to the store.
             FlowCanvas(store: store) { node, ctx in
+                let inset = FlowHandle.diameter / 2
                 LiveNode(node: node, context: ctx, capture: .manual) {
                     WebNodeRepresentable(
                         nodeID: node.id,
@@ -2551,6 +2552,8 @@ private struct LiveOverlayFlowPreview: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.secondary.opacity(0.08))
                 }
+                .frame(width: node.size.width, height: node.size.height)
+                .padding(inset)
                 .overlay { FlowNodeHandles(node: node, context: ctx) }
             }
             .liveNodeActivation { node, store in

@@ -216,18 +216,21 @@ The default `Canvas` + `resolveSymbol` pipeline rasterizes each node every frame
 
 ```swift
 FlowCanvas(store: store) { node, ctx in
+    let inset = FlowHandle.diameter / 2
     LiveNode(node: node, context: ctx) {
         TimelineView(.animation) { tl in
             ClockFace(date: tl.date)
         }
     }
+    .frame(width: node.size.width, height: node.size.height)
+    .padding(inset)
     .overlay { FlowNodeHandles(node: node, context: ctx) }
 }
 ```
 
 The library seeds a snapshot on first mount and re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path always has something to draw and colors / fonts stay consistent across the active ↔ inactive transition.
 
-Handle drawing is the caller's responsibility — identical to the rest of the custom-node rendering path. Use `FlowNodeHandles(node:context:)` for the library default look, or compose `FlowHandle` views directly for fully custom handle styling. `LiveNode` only manages the rasterize ↔ live dispatch and reserves the handle-inset frame so the handles you draw on top aren't clipped.
+`LiveNode` is a pure phase dispatcher — it applies no sizing, padding, clipping, or other styling. The caller composes all visual treatment (frame, corner radius, the handle-inset padding that keeps handles on the border from being clipped, background, overlays, etc.) with ordinary SwiftUI modifiers around `LiveNode`. Handle drawing is likewise the caller's responsibility: use `FlowNodeHandles(node:context:)` for the library default look, or compose `FlowHandle` views directly for fully custom handles.
 
 ### Native Views (WKWebView / MKMapView / AVPlayerView)
 
@@ -235,11 +238,14 @@ Native views can't be rendered off-screen by `ImageRenderer`. Use `.manual` capt
 
 ```swift
 FlowCanvas(store: store) { node, ctx in
+    let inset = FlowHandle.diameter / 2
     LiveNode(node: node, context: ctx, capture: .manual) {
         WebViewRepresentable(url: node.data.url)
     } placeholder: {
         ProgressView()
     }
+    .frame(width: node.size.width, height: node.size.height)
+    .padding(inset)
     .overlay { FlowNodeHandles(node: node, context: ctx) }
 }
 ```

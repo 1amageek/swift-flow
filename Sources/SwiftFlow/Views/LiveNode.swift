@@ -4,21 +4,23 @@ import SwiftUI
 /// while the node is active, and as a rasterized snapshot while it is
 /// inactive — all from a single call site.
 ///
-/// Place inside the `nodeContent` closure of `FlowCanvas`. `LiveNode`
-/// only handles the rasterize ↔ live dispatch and keeps the node sized
-/// to `node.size + FlowHandle.diameter` so handles on the border are not
-/// clipped; **handle drawing is the caller's responsibility**, matching
-/// the rest of the custom-node rendering path. Use
-/// ``FlowNodeHandles`` for the library default styling, or compose raw
-/// ``FlowHandle`` views for fully custom handles.
+/// `LiveNode` is a pure phase dispatcher: it emits the snapshot image on
+/// the rasterize path and the caller-supplied live view on the live
+/// path, and **applies no sizing, padding, clipping, or other styling**.
+/// All visual treatment — frame, corner radius, handle-border inset,
+/// background, overlay — is the caller's responsibility, composed with
+/// ordinary SwiftUI modifiers around `LiveNode`.
 ///
 /// ```
 /// FlowCanvas(store: store) { node, ctx in
+///     let inset = FlowHandle.diameter / 2
 ///     LiveNode(node: node, context: ctx) {
 ///         TimelineView(.animation) { tl in
 ///             ClockFace(date: tl.date)
 ///         }
 ///     }
+///     .frame(width: node.size.width, height: node.size.height)
+///     .padding(inset)
 ///     .overlay { FlowNodeHandles(node: node, context: ctx) }
 /// }
 /// ```
@@ -57,20 +59,9 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
     }
 
     public var body: some View {
-        // Canvas allocates `node.size + FlowHandle.diameter` per symbol so
-        // handles drawn on the border aren't clipped. `LiveNode` preserves
-        // that allotment here so the overlay layer, rasterized symbol, and
-        // any app-drawn handles share the exact same frame — otherwise the
-        // live ↔ rasterize swap would "pop" by half a handle on every edge.
-        //
-        // Handle drawing itself is the caller's responsibility: the app
-        // may overlay `FlowNodeHandles(node:context:)` for library default
-        // styling, compose raw `FlowHandle` views for custom styling, or
-        // omit handles entirely. `LiveNode` never injects them implicitly.
-        let inset = FlowHandle.diameter / 2
+        // Pure phase dispatch. No frame, padding, clip, or other styling
+        // — the caller composes sizing and visual treatment outside.
         contentBody
-            .frame(width: node.size.width, height: node.size.height)
-            .padding(inset)
     }
 
     @ViewBuilder

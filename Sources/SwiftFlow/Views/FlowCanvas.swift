@@ -311,6 +311,34 @@ public struct FlowCanvas<
         let snapshotWriter: @MainActor (String, FlowNodeSnapshot) -> Void = { [store] id, snap in
             store.setNodeSnapshot(snap, for: id)
         }
+        let dragDispatcher = FlowNodeDragDispatcher(
+            begin: { [store] nodeID in
+                guard let node = store.nodeLookup[nodeID], node.isDraggable else { return [:] }
+                var starts: [String: CGPoint] = [:]
+                if node.isSelected, store.selectedNodeIDs.count > 1 {
+                    for selectedID in store.selectedNodeIDs {
+                        if let n = store.nodeLookup[selectedID], n.isDraggable {
+                            starts[selectedID] = n.position
+                        }
+                    }
+                } else {
+                    starts[nodeID] = node.position
+                }
+                return starts
+            },
+            update: { [store] starts, translation in
+                let zoom = store.viewport.zoom
+                for (id, startPos) in starts {
+                    store.moveNode(id, to: CGPoint(
+                        x: startPos.x + translation.width / zoom,
+                        y: startPos.y + translation.height / zoom
+                    ))
+                }
+            },
+            end: { [store] starts in
+                store.completeMoveNodes(from: starts)
+            }
+        )
 
         #if os(macOS)
         let hostView = CanvasHostView(
@@ -380,6 +408,7 @@ public struct FlowCanvas<
             }
         }
         .environment(\.flowLiveNodeSnapshotWriter, snapshotWriter)
+        .environment(\.flowNodeDragDispatcher, dragDispatcher)
         #else
         let hostView = CanvasHostView(
             onPan: { delta in
@@ -426,6 +455,7 @@ public struct FlowCanvas<
             }
         }
         .environment(\.flowLiveNodeSnapshotWriter, snapshotWriter)
+        .environment(\.flowNodeDragDispatcher, dragDispatcher)
         #endif
     }
 

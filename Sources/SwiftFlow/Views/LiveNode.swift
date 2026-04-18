@@ -98,7 +98,14 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
             // toggles so native views (WKWebView / MKMapView / AVPlayerView)
             // don't reload. `.onDisappear` therefore no longer fires on
             // deactivation — detect the true → false transition explicitly.
+            //
+            // Also seed a snapshot on first mount so the rasterize path
+            // has something to draw before the user ever activates this
+            // node. The overlay runs viewport culling, so `onAppear`
+            // fires on initial Canvas display for visible nodes and on
+            // scroll-in for nodes panned into view.
             live()
+                .onAppear { seedSnapshotIfNeeded() }
                 .onChange(of: isActive) { oldValue, newValue in
                     if oldValue && !newValue { captureNow() }
                 }
@@ -109,13 +116,25 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
             // CPU re-rasterizing a view nobody is looking at; rejoin the
             // loop once activation flips back to true.
             live()
+                .onAppear { seedSnapshotIfNeeded() }
                 .task(id: "\(node.id)|active=\(isActive)") {
                     guard isActive else { return }
                     await runPeriodicCapture(interval: interval)
                 }
         case .manual:
+            // The app owns snapshot writes for native views the library
+            // can't render off-screen (WKWebView / MKMapView / …). Mount
+            // the live subtree as-is so its own lifecycle (representables
+            // inside `.task`, etc.) can drive `store.setNodeSnapshot`.
             live()
         }
+    }
+
+    @MainActor
+    private func seedSnapshotIfNeeded() {
+        guard capture != .manual else { return }
+        guard context.snapshot == nil else { return }
+        captureNow()
     }
 
     private func runPeriodicCapture(interval: TimeInterval) async {

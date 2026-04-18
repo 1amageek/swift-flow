@@ -11,13 +11,23 @@ import SwiftUI
 /// Re-evaluates the caller-supplied `nodeContent` closure for every node
 /// inside the viewport with `flowNodeRenderPhase = .live` injected, so
 /// any `LiveNode` declared inside that closure automatically switches
-/// from its rasterize branch to its live branch. Nodes that the
-/// activation predicate reports as inactive stay mounted here but render
-/// at `opacity(0)` with hit testing disabled — this preserves WKWebView
-/// / MKMapView identity (page load state, scroll position, JS state,
-/// player state) across active↔inactive toggles and eliminates the
-/// teardown/reload flicker that happens when the subtree is
-/// conditionally removed.
+/// from its rasterize branch to its live branch. Nodes the overlay
+/// considers inactive stay mounted at `opacity(0)` with hit testing
+/// disabled — this preserves WKWebView / MKMapView identity (page load
+/// state, scroll position, JS state, player state) across active↔inactive
+/// toggles and eliminates the teardown/reload flicker that happens when
+/// the subtree is conditionally removed.
+///
+/// ## Two-phase deactivation
+///
+/// Activation "rendered" state is owned by
+/// ``LiveNodeActivationCoordinator``, not by the raw predicate result.
+/// When the predicate flips `true → false` the coordinator awaits the
+/// `LiveNode`-registered capture handler before lowering `renderedActive`
+/// — so the rasterize path has a fresh snapshot the instant the overlay
+/// fades. The overlay reads `coordinator.renderedActive` for opacity / hit
+/// testing, and feeds each body evaluation back in with `update(...)` so
+/// predicate edges trigger the coordinator's transitions.
 ///
 /// Off-screen nodes are culled from the overlay so we don't pay for
 /// WKWebView page loads, SwiftUI subtree work, or capture costs that
@@ -34,6 +44,7 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
     let renderContext: (FlowNode<NodeData>) -> NodeRenderContext
     let activation: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool
+    let coordinator: LiveNodeActivationCoordinator
 
     /// Screen-pixel inflation applied to the visible canvas rect so nodes
     /// a short pan away are pre-mounted for smooth scroll-in.
@@ -79,7 +90,13 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
 
         ZStack(alignment: .topLeading) {
             ForEach(visibleNodes, id: \.id) { node in
-                let isActive = activation(node, store)
+                // Read the predicate as a read-only signal during body.
+                // Mutation of `coordinator.renderedActive` happens only
+                // inside `.onChange` below — writing to `@Observable`
+                // state during body evaluation would invalidate our own
+                // read of `renderedActive` and loop the render.
+                let intent = activation(node, store)
+                let isActive = coordinator.isRenderedActive(node.id)
                 let screenOrigin = viewport.canvasToScreen(node.position)
                 nodeContent(node, renderContext(node))
                     .environment(\.flowNodeRenderPhase, .live)
@@ -96,8 +113,12 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                     )
                     .opacity(isActive ? 1 : 0)
                     .allowsHitTesting(isActive)
+                    .onChange(of: intent, initial: true) { _, newIntent in
+                        coordinator.update(nodeID: node.id, intent: newIntent)
+                    }
             }
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
+        .environment(\.liveNodeActivationCoordinator, coordinator)
     }
 }

@@ -239,6 +239,14 @@ public struct FlowCanvas<
 
     @State private var doubleTapDetector = DoubleTapDetector()
 
+    // MARK: - Live Node Activation Coordinator
+
+    /// Owns the two-phase deactivation state shared by `LiveNode`
+    /// (registers capture handlers), `LiveNodeOverlay` (reads
+    /// `renderedActive` for opacity/hit testing), and `drawNodes` (skips
+    /// drawing nodes whose live overlay is covering them).
+    @State private var liveNodeActivationCoordinator = LiveNodeActivationCoordinator()
+
     public var body: some View {
         GeometryReader { geometry in
             canvasBody(in: geometry.size)
@@ -356,7 +364,8 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
-                activation: liveNodeActivationPredicate
+                activation: liveNodeActivationPredicate,
+                coordinator: liveNodeActivationCoordinator
             )
             if hasAccessory {
                 AccessoryOverlay(
@@ -401,7 +410,8 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
-                activation: liveNodeActivationPredicate
+                activation: liveNodeActivationPredicate,
+                coordinator: liveNodeActivationCoordinator
             )
             if hasAccessory {
                 AccessoryOverlay(
@@ -639,10 +649,13 @@ public struct FlowCanvas<
         for index in store.nodeIndicesFrontToBack.reversed() {
             let node = store.nodes[index]
 
-            // Skip rasterized draw for nodes that are active in the live overlay
-            // layer, otherwise the native view and its frozen snapshot paint
-            // on top of each other.
-            if liveNodeActivationPredicate(node, store) {
+            // Skip rasterized draw for nodes the overlay is currently
+            // rendering. Keyed on the coordinator's `renderedActive`
+            // state — not the raw predicate — so nodes mid-deactivation
+            // (overlay still at opacity 1, capture in flight) don't have
+            // the stale snapshot bleeding through underneath while we
+            // wait for the fresh one to land.
+            if liveNodeActivationCoordinator.isRenderedActive(node.id) {
                 continue
             }
 
@@ -2544,15 +2557,20 @@ private struct LiveOverlayFlowPreview: View {
             FlowCanvas(store: store) { node, ctx in
                 let inset = FlowHandle.diameter / 2
                 let cornerRadius: CGFloat = 12
-                LiveNode(node: node, context: ctx, capture: .manual) {
+                let nodeID = node.id
+                LiveNode(
+                    node: node,
+                    context: ctx,
+                    capture: .manual(capture: { await captureSnapshot(nodeID: nodeID) })
+                ) {
                     WebNodeRepresentable(
-                        nodeID: node.id,
+                        nodeID: nodeID,
                         url: node.data.url,
                         cornerRadius: cornerRadius,
                         bag: bag
                     )
-                    .task(id: node.id) {
-                        await snapshotLoop(nodeID: node.id)
+                    .task(id: nodeID) {
+                        await snapshotLoop(nodeID: nodeID)
                     }
                 } placeholder: {
                     VStack(spacing: 8) {
@@ -2623,6 +2641,322 @@ private struct LiveOverlayFlowPreview: View {
 
 #Preview("FlowCanvas - Live Node (WKWebView)") {
     LiveOverlayFlowPreview()
+}
+
+#endif
+
+// MARK: - Live Node Preview (MKMapView)
+
+#if canImport(MapKit)
+
+import MapKit
+
+private struct MapPreviewData: Sendable, Hashable {
+    let latitude: Double
+    let longitude: Double
+    let title: String
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+/// Retains MKMapView instances across overlay remount (viewport culling,
+/// scroll-out → scroll-in) so panning / zooming state isn't lost when the
+/// node briefly leaves the visible rect.
+@MainActor
+@Observable
+private final class MapViewBag {
+    var mapViews: [String: MKMapView] = [:]
+}
+
+#if os(iOS)
+private struct MapNodeRepresentable: UIViewRepresentable {
+    let nodeID: String
+    let initialCoordinate: CLLocationCoordinate2D
+    let cornerRadius: CGFloat
+    let bag: MapViewBag
+
+    func makeUIView(context: Context) -> MKMapView {
+        let mv: MKMapView
+        if let existing = bag.mapViews[nodeID] {
+            existing.removeFromSuperview()
+            mv = existing
+        } else {
+            mv = MKMapView()
+            mv.setRegion(
+                MKCoordinateRegion(
+                    center: initialCoordinate,
+                    latitudinalMeters: 3000,
+                    longitudinalMeters: 3000
+                ),
+                animated: false
+            )
+            bag.mapViews[nodeID] = mv
+        }
+        mv.layer.cornerRadius = cornerRadius
+        mv.layer.masksToBounds = true
+        return mv
+    }
+
+    func updateUIView(_ mv: MKMapView, context: Context) {
+        if mv.layer.cornerRadius != cornerRadius {
+            mv.layer.cornerRadius = cornerRadius
+        }
+    }
+}
+#elseif os(macOS)
+private struct MapNodeRepresentable: NSViewRepresentable {
+    let nodeID: String
+    let initialCoordinate: CLLocationCoordinate2D
+    let cornerRadius: CGFloat
+    let bag: MapViewBag
+
+    func makeNSView(context: Context) -> MKMapView {
+        let mv: MKMapView
+        if let existing = bag.mapViews[nodeID] {
+            existing.removeFromSuperview()
+            mv = existing
+        } else {
+            mv = MKMapView()
+            mv.setRegion(
+                MKCoordinateRegion(
+                    center: initialCoordinate,
+                    latitudinalMeters: 3000,
+                    longitudinalMeters: 3000
+                ),
+                animated: false
+            )
+            bag.mapViews[nodeID] = mv
+        }
+        mv.wantsLayer = true
+        mv.layer?.cornerRadius = cornerRadius
+        mv.layer?.masksToBounds = true
+        return mv
+    }
+
+    func updateNSView(_ mv: MKMapView, context: Context) {
+        if mv.layer?.cornerRadius != cornerRadius {
+            mv.layer?.cornerRadius = cornerRadius
+        }
+    }
+}
+#endif
+
+/// Only mounts `MapNodeRepresentable` while the node is rendered active.
+///
+/// The overlay applies `opacity(0)` to inactive nodes, which pauses the
+/// `CAMetalLayer` tile pipeline used by `MKMapView` — when the ancestor
+/// opacity later flips back to `1` the Metal drawable never resumes and
+/// the live map shows blank. Keeping the representable out of the view
+/// tree while inactive sidesteps the issue entirely; the `MKMapView`
+/// instance itself is retained in `MapViewBag` so pan / zoom state is
+/// preserved across mount cycles.
+///
+/// Snapshot refresh is driven by the `LiveNode` coordinator via the
+/// `.manual(capture:)` handler registered at the call site — no
+/// `onChange(isActive)` trigger is needed here.
+private struct MapNodeLive: View {
+    let nodeID: String
+    let initialCoordinate: CLLocationCoordinate2D
+    let cornerRadius: CGFloat
+    let bag: MapViewBag
+    let seedSnapshot: () async -> Void
+
+    @Environment(\.isFlowNodeActive) private var isActive
+
+    var body: some View {
+        Group {
+            if isActive {
+                MapNodeRepresentable(
+                    nodeID: nodeID,
+                    initialCoordinate: initialCoordinate,
+                    cornerRadius: cornerRadius,
+                    bag: bag
+                )
+            } else {
+                Color.clear
+            }
+        }
+        .task(id: nodeID) {
+            await seedSnapshot()
+        }
+    }
+}
+
+/// Applies a drop shadow only on the rasterize pass. SwiftUI `.shadow`
+/// forces an offscreen compositing group that `CAMetalLayer` drawables
+/// don't participate in, so the live MKMapView keeps only its `CALayer`
+/// cornerRadius and forgoes the shadow.
+private struct PhaseGatedShadow: ViewModifier {
+    @Environment(\.flowNodeRenderPhase) private var phase
+
+    func body(content: Content) -> some View {
+        switch phase {
+        case .rasterize:
+            content.shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+        case .live:
+            content
+        }
+    }
+}
+
+private struct MapOverlayFlowPreview: View {
+
+    @State private var bag = MapViewBag()
+    @State private var store: FlowStore<MapPreviewData> = {
+        FlowStore<MapPreviewData>(
+            nodes: [
+                FlowNode(
+                    id: "tokyo",
+                    position: CGPoint(x: 60, y: 80),
+                    size: CGSize(width: 360, height: 240),
+                    data: MapPreviewData(
+                        latitude: 35.6812,
+                        longitude: 139.7671,
+                        title: "Tokyo Station"
+                    )
+                ),
+                FlowNode(
+                    id: "kyoto",
+                    position: CGPoint(x: 520, y: 140),
+                    size: CGSize(width: 360, height: 240),
+                    data: MapPreviewData(
+                        latitude: 35.0116,
+                        longitude: 135.7681,
+                        title: "Kyoto"
+                    )
+                ),
+                FlowNode(
+                    id: "osaka",
+                    position: CGPoint(x: 300, y: 420),
+                    size: CGSize(width: 360, height: 240),
+                    data: MapPreviewData(
+                        latitude: 34.6937,
+                        longitude: 135.5023,
+                        title: "Osaka"
+                    )
+                ),
+            ],
+            edges: [
+                FlowEdge(
+                    id: "e1",
+                    sourceNodeID: "tokyo",
+                    sourceHandleID: "source",
+                    targetNodeID: "kyoto",
+                    targetHandleID: "target"
+                ),
+                FlowEdge(
+                    id: "e2",
+                    sourceNodeID: "kyoto",
+                    sourceHandleID: "source",
+                    targetNodeID: "osaka",
+                    targetHandleID: "target"
+                ),
+            ]
+        )
+    }()
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            // MKMapView can't be captured via ImageRenderer (Metal-backed),
+            // so we use `.manual` capture and write snapshots from an
+            // off-screen MKMapSnapshotter mirroring the live view's region.
+            FlowCanvas(store: store) { node, ctx in
+                let inset = FlowHandle.diameter / 2
+                let cornerRadius: CGFloat = 12
+                LiveNode(
+                    node: node,
+                    context: ctx,
+                    capture: .manual(capture: { await captureMapSnapshot(for: node) })
+                ) {
+                    MapNodeLive(
+                        nodeID: node.id,
+                        initialCoordinate: node.data.coordinate,
+                        cornerRadius: cornerRadius,
+                        bag: bag,
+                        seedSnapshot: { await captureMapSnapshot(for: node) }
+                    )
+                } placeholder: {
+                    VStack(spacing: 8) {
+                        ProgressView()
+                        Text(node.data.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.secondary.opacity(0.08))
+                }
+                .frame(width: node.size.width, height: node.size.height)
+                .modifier(PhaseGatedShadow())
+                .padding(inset)
+                .overlay { FlowNodeHandles(node: node, context: ctx) }
+            }
+            .liveNodeActivation { node, store in
+                store.selectedNodeIDs.contains(node.id)
+                    || store.hoveredNodeID == node.id
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("MKMapView Live Node").font(.headline)
+                Text("Hover or select a node to pan and zoom the live map.")
+                Text("Off-screen nodes are culled; scroll-in remounts and reseeds the snapshot.")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .padding(10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .padding(12)
+        }
+    }
+
+    @MainActor
+    private func captureMapSnapshot(for node: FlowNode<MapPreviewData>) async {
+        let options = MKMapSnapshotter.Options()
+        // Use the live mapView's current region if available so user pans /
+        // zooms show up in the rasterize path; fall back to the node's
+        // initial coordinate until the view first mounts.
+        if let mv = bag.mapViews[node.id] {
+            options.region = mv.region
+        } else {
+            options.region = MKCoordinateRegion(
+                center: node.data.coordinate,
+                latitudinalMeters: 3000,
+                longitudinalMeters: 3000
+            )
+        }
+        options.size = node.size
+        #if os(iOS)
+        options.scale = 2
+        #endif
+
+        let snapshotter = MKMapSnapshotter(options: options)
+        do {
+            let snap = try await snapshotter.start()
+            #if os(iOS)
+            guard let cgImage = snap.image.cgImage else { return }
+            let scale = snap.image.scale
+            #elseif os(macOS)
+            var rect = CGRect(origin: .zero, size: snap.image.size)
+            guard let cgImage = snap.image.cgImage(
+                forProposedRect: &rect,
+                context: nil,
+                hints: nil
+            ) else { return }
+            let scale = CGFloat(cgImage.width) / max(snap.image.size.width, 1)
+            #endif
+            store.setNodeSnapshot(
+                FlowNodeSnapshot(cgImage: cgImage, scale: scale),
+                for: node.id
+            )
+        } catch {
+            // Snapshot failed (transient); next iteration will retry.
+        }
+    }
+}
+
+#Preview("FlowCanvas - Live Node (MKMapView)") {
+    MapOverlayFlowPreview()
 }
 
 #endif

@@ -234,12 +234,17 @@ The library seeds a snapshot on first mount and re-captures on deactivation usin
 
 ### Native Views (WKWebView / MKMapView / AVPlayerView)
 
-Native views can't be rendered off-screen by `ImageRenderer`. Use `.manual` capture and write snapshots yourself using the framework-native APIs (`WKWebView.takeSnapshot`, `MKMapSnapshotter`, `AVPlayerItemVideoOutput.copyPixelBuffer`):
+Native views can't be rendered off-screen by `ImageRenderer`. Use `.manual(capture:)` and supply an async closure that writes a fresh snapshot using the framework-native APIs (`WKWebView.takeSnapshot`, `MKMapSnapshotter`, `AVPlayerItemVideoOutput.copyPixelBuffer`). The library awaits your handler on deactivation **before** the overlay fades — so the rasterize path always shows the newest frame with no stale-thumbnail flash:
 
 ```swift
 FlowCanvas(store: store) { node, ctx in
     let inset = FlowHandle.diameter / 2
-    LiveNode(node: node, context: ctx, capture: .manual) {
+    let nodeID = node.id
+    LiveNode(
+        node: node,
+        context: ctx,
+        capture: .manual(capture: { await captureSnapshot(nodeID: nodeID) })
+    ) {
         WebViewRepresentable(url: node.data.url)
     } placeholder: {
         ProgressView()
@@ -252,20 +257,27 @@ FlowCanvas(store: store) { node, ctx in
 
 ```swift
 // App-layer snapshot write
-let image = try await webView.takeSnapshot(configuration: WKSnapshotConfiguration())
-store.setNodeSnapshot(
-    FlowNodeSnapshot(cgImage: image.cgImage!, scale: image.scale),
-    for: nodeID
-)
+@MainActor
+func captureSnapshot(nodeID: String) async {
+    guard let webView = webViewBag.webViews[nodeID] else { return }
+    let image = try? await webView.takeSnapshot(configuration: WKSnapshotConfiguration())
+    guard let cgImage = image?.cgImage else { return }
+    store.setNodeSnapshot(
+        FlowNodeSnapshot(cgImage: cgImage, scale: image!.scale),
+        for: nodeID
+    )
+}
 ```
 
 ### Capture Cadence
 
 | `LiveNodeCapture` | Behavior |
 |---|---|
-| `.onDeactivation` *(default)* | Capture once on mount + on each active → inactive transition |
-| `.periodic(TimeInterval)` | Capture at the given interval while active; paused when inactive |
-| `.manual` | Library never captures — required for native views |
+| `.onDeactivation` *(default)* | Capture once on mount + once when deactivation starts |
+| `.periodic(TimeInterval)` | Capture at the given interval while active + once when deactivation starts |
+| `.manual(capture:)` | Library awaits your async closure on each deactivation — required for native views |
+
+All modes route their final capture through the deactivation coordinator: the live overlay stays mounted at opacity 1 until the capture returns, so the first frame the user sees after deactivation is the **new** snapshot, not the previous one.
 
 ### Activation
 

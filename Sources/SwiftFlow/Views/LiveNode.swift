@@ -28,8 +28,8 @@ import SwiftUI
 /// Capture of the snapshot used by the Canvas rasterize path is
 /// automatic for SwiftUI-only content (see ``LiveNodeCapture``). Native
 /// views (`WKWebView` / `MKMapView` / `AVPlayerView`) must use
-/// ``LiveNodeCapture/manual`` and write `FlowNodeSnapshot` values via
-/// `FlowStore.setNodeSnapshot(_:for:)` themselves.
+/// ``LiveNodeCapture/manual(capture:)`` and write `FlowNodeSnapshot`
+/// values via `FlowStore.setNodeSnapshot(_:for:)` themselves.
 public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: View>: View {
 
     private let node: FlowNode<NodeData>
@@ -43,6 +43,7 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
     @Environment(\.self) private var environment
     @Environment(\.displayScale) private var displayScale
     @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
+    @Environment(\.liveNodeActivationCoordinator) private var coordinator
 
     public init(
         node: FlowNode<NodeData>,
@@ -83,67 +84,87 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
         } else {
             placeholder()
                 .onAppear {
-                    if capture != .manual {
-                        captureNow()
-                    }
+                    if case .manual = capture { return }
+                    captureNow()
                 }
         }
     }
 
+    /// The overlay keeps this subtree mounted across activation toggles
+    /// so native views (WKWebView / MKMapView / AVPlayerView) don't
+    /// reload. Capture on deactivation is routed through
+    /// ``LiveNodeActivationCoordinator`` so the snapshot is written
+    /// **before** the overlay fades and the Canvas repaints — otherwise
+    /// the stale cached image flashes between deactivation and the
+    /// async capture completing.
     @ViewBuilder
     private var liveBody: some View {
+        let nodeID = node.id
+        // Re-register on every inputs change so the handler closure
+        // always sees the latest `node.size`, caller-provided manual
+        // closure, etc. `SwiftUI.View` is a value type, so the closure
+        // registered from a stale `self` would otherwise capture inputs
+        // from the first mount only. The task id is cheap; registration
+        // itself is idempotent (just a dictionary overwrite).
+        live()
+            .onAppear { seedSnapshotIfNeeded() }
+            .onDisappear {
+                coordinator?.unregisterCapture(for: nodeID)
+            }
+            .task(id: captureRegistrationIdentity) {
+                registerCaptureHandler()
+            }
+            .modifier(PeriodicCaptureModifier(capture: capture, isActive: isActive, captureNow: captureNow, nodeID: nodeID))
+    }
+
+    /// Identity string that rebuilds the registration task whenever
+    /// inputs the handler depends on change. `.manual` users that swap
+    /// the capture closure across body evaluations should bump something
+    /// observable on the outer view to trigger re-registration; in
+    /// practice the stable tuple below covers SwiftUI-only and native
+    /// representable call sites.
+    private var captureRegistrationIdentity: String {
+        let mode: String
         switch capture {
-        case .onDeactivation:
-            // The overlay keeps this subtree mounted across activation
-            // toggles so native views (WKWebView / MKMapView / AVPlayerView)
-            // don't reload. `.onDisappear` therefore no longer fires on
-            // deactivation — detect the true → false transition explicitly.
-            //
-            // Also seed a snapshot on first mount so the rasterize path
-            // has something to draw before the user ever activates this
-            // node. The overlay runs viewport culling, so `onAppear`
-            // fires on initial Canvas display for visible nodes and on
-            // scroll-in for nodes panned into view.
-            live()
-                .onAppear { seedSnapshotIfNeeded() }
-                .onChange(of: isActive) { oldValue, newValue in
-                    if oldValue && !newValue { captureNow() }
-                }
-        case .periodic(let interval):
-            // Only run the capture loop while the overlay considers this
-            // node active. The subtree stays mounted when inactive (to
-            // preserve native-view identity) but there's no point burning
-            // CPU re-rasterizing a view nobody is looking at; rejoin the
-            // loop once activation flips back to true.
-            live()
-                .onAppear { seedSnapshotIfNeeded() }
-                .task(id: "\(node.id)|active=\(isActive)") {
-                    guard isActive else { return }
-                    await runPeriodicCapture(interval: interval)
-                }
-        case .manual:
-            // The app owns snapshot writes for native views the library
-            // can't render off-screen (WKWebView / MKMapView / …). Mount
-            // the live subtree as-is so its own lifecycle (representables
-            // inside `.task`, etc.) can drive `store.setNodeSnapshot`.
-            live()
+        case .onDeactivation: mode = "d"
+        case .periodic(let i): mode = "p\(i)"
+        case .manual: mode = "m"
         }
+        return "\(node.id)|\(Int(node.size.width))x\(Int(node.size.height))|\(mode)"
+    }
+
+    /// Registers the mode-specific capture handler with the overlay
+    /// coordinator. `onDeactivation` / `periodic` route through
+    /// `captureNow()` (ImageRenderer); `.manual(capture:)` forwards the
+    /// caller-supplied async closure.
+    @MainActor
+    private func registerCaptureHandler() {
+        guard let coordinator else { return }
+        let nodeID = node.id
+        switch capture {
+        case .onDeactivation, .periodic:
+            coordinator.registerCapture(for: nodeID) {
+                await captureNowAwaitable()
+            }
+        case .manual(let handler):
+            coordinator.registerCapture(for: nodeID, handler: handler)
+        }
+    }
+
+    /// `ImageRenderer` is synchronous, but exposing it as `async` keeps
+    /// the coordinator's handler signature uniform and lets a future
+    /// implementation swap in an off-thread rasterizer without touching
+    /// the coordinator.
+    @MainActor
+    private func captureNowAwaitable() async {
+        captureNow()
     }
 
     @MainActor
     private func seedSnapshotIfNeeded() {
-        guard capture != .manual else { return }
+        if case .manual = capture { return }
         guard context.snapshot == nil else { return }
         captureNow()
-    }
-
-    private func runPeriodicCapture(interval: TimeInterval) async {
-        let nanos = UInt64(max(interval, 0.05) * 1_000_000_000)
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: nanos)
-            if Task.isCancelled { return }
-            captureNow()
-        }
     }
 
     @MainActor
@@ -158,6 +179,36 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
         renderer.scale = scale
         guard let cgImage = renderer.cgImage else { return }
         writer(node.id, FlowNodeSnapshot(cgImage: cgImage, scale: scale))
+    }
+}
+
+// MARK: - Periodic capture
+
+/// Applies the periodic capture loop only when ``LiveNodeCapture/periodic``
+/// is selected. Extracted into a modifier so `LiveNode.liveBody` stays
+/// declarative and avoids a per-mode switch that would force every capture
+/// mode to pay the `.task(id:)` rebuild cost.
+private struct PeriodicCaptureModifier: ViewModifier {
+    let capture: LiveNodeCapture
+    let isActive: Bool
+    let captureNow: @MainActor () -> Void
+    let nodeID: String
+
+    func body(content: Content) -> some View {
+        switch capture {
+        case .periodic(let interval):
+            content.task(id: "\(nodeID)|active=\(isActive)") {
+                guard isActive else { return }
+                let nanos = UInt64(max(interval, 0.05) * 1_000_000_000)
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: nanos)
+                    if Task.isCancelled { return }
+                    await MainActor.run { captureNow() }
+                }
+            }
+        case .onDeactivation, .manual:
+            content
+        }
     }
 }
 

@@ -2304,30 +2304,31 @@ private struct ResizeHandleOverlay<Data: Sendable & Hashable>: View {
 
 private struct ResizablePreviewNode: View {
     let node: FlowNode<ResizablePreviewData>
+    let context: NodeRenderContext
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 10)
-            .fill(color.opacity(0.15))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(color.opacity(0.4), lineWidth: 1)
-            )
-            .overlay {
-                VStack(spacing: 4) {
-                    Text(node.data.title)
-                        .font(.headline)
-                    Text("\(Int(node.size.width)) × \(Int(node.size.height))")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
+        let inset = FlowHandle.diameter / 2
+        ZStack {
+            RoundedRectangle(cornerRadius: 10)
+                .fill(color.opacity(0.15))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(color.opacity(0.4), lineWidth: 1)
+                )
+                .overlay {
+                    VStack(spacing: 4) {
+                        Text(node.data.title)
+                            .font(.headline)
+                        Text("\(Int(node.size.width)) × \(Int(node.size.height))")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                 }
-            }
-            .overlay {
-                ForEach(node.handles, id: \.id) { handle in
-                    FlowHandle(handle.id, type: handle.type, position: handle.position)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment(for: handle.position))
-                }
-            }
-            .frame(width: node.size.width, height: node.size.height)
+                .padding(inset)
+
+            FlowNodeHandles(node: node, context: context)
+        }
+        .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
     }
 
     private var color: Color {
@@ -2336,15 +2337,6 @@ private struct ResizablePreviewNode: View {
         case "orange": return .orange
         case "green":  return .green
         default:       return .gray
-        }
-    }
-
-    private func alignment(for position: HandlePosition) -> Alignment {
-        switch position {
-        case .top:    .top
-        case .bottom: .bottom
-        case .left:   .leading
-        case .right:  .trailing
         }
     }
 }
@@ -2386,8 +2378,8 @@ private struct ResizableFlowPreview: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            FlowCanvas(store: store) { node, _ in
-                ResizablePreviewNode(node: node)
+            FlowCanvas(store: store) { node, ctx in
+                ResizablePreviewNode(node: node, context: ctx)
             }
             .overlay {
                 ForEach(Array(store.selectedNodeIDs), id: \.self) { id in
@@ -2453,39 +2445,57 @@ private final class WebViewBag {
 private struct WebNodeRepresentable: UIViewRepresentable {
     let nodeID: String
     let url: URL
+    let cornerRadius: CGFloat
     let bag: WebViewBag
 
     func makeUIView(context: Context) -> WKWebView {
+        let wv: WKWebView
         if let existing = bag.webViews[nodeID] {
             existing.removeFromSuperview()
-            return existing
+            wv = existing
+        } else {
+            wv = WKWebView()
+            wv.load(URLRequest(url: url))
+            bag.webViews[nodeID] = wv
         }
-        let wv = WKWebView()
-        wv.load(URLRequest(url: url))
-        bag.webViews[nodeID] = wv
+        wv.layer.cornerRadius = cornerRadius
+        wv.layer.masksToBounds = true
+        wv.scrollView.layer.cornerRadius = cornerRadius
+        wv.scrollView.layer.masksToBounds = true
         return wv
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        uiView.layer.cornerRadius = cornerRadius
+        uiView.scrollView.layer.cornerRadius = cornerRadius
+    }
 }
 #elseif os(macOS)
 private struct WebNodeRepresentable: NSViewRepresentable {
     let nodeID: String
     let url: URL
+    let cornerRadius: CGFloat
     let bag: WebViewBag
 
     func makeNSView(context: Context) -> WKWebView {
+        let wv: WKWebView
         if let existing = bag.webViews[nodeID] {
             existing.removeFromSuperview()
-            return existing
+            wv = existing
+        } else {
+            wv = WKWebView()
+            wv.load(URLRequest(url: url))
+            bag.webViews[nodeID] = wv
         }
-        let wv = WKWebView()
-        wv.load(URLRequest(url: url))
-        bag.webViews[nodeID] = wv
+        wv.wantsLayer = true
+        wv.layer?.cornerRadius = cornerRadius
+        wv.layer?.masksToBounds = true
         return wv
     }
 
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        nsView.layer?.cornerRadius = cornerRadius
+    }
 }
 #endif
 
@@ -2533,10 +2543,12 @@ private struct LiveOverlayFlowPreview: View {
             // itself and writes them to the store.
             FlowCanvas(store: store) { node, ctx in
                 let inset = FlowHandle.diameter / 2
+                let cornerRadius: CGFloat = 12
                 LiveNode(node: node, context: ctx, capture: .manual) {
                     WebNodeRepresentable(
                         nodeID: node.id,
                         url: node.data.url,
+                        cornerRadius: cornerRadius,
                         bag: bag
                     )
                     .task(id: node.id) {
@@ -2553,6 +2565,8 @@ private struct LiveOverlayFlowPreview: View {
                     .background(Color.secondary.opacity(0.08))
                 }
                 .frame(width: node.size.width, height: node.size.height)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
                 .padding(inset)
                 .overlay { FlowNodeHandles(node: node, context: ctx) }
             }

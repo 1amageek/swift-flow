@@ -1,5 +1,8 @@
 import SwiftUI
 import UniformTypeIdentifiers
+#if canImport(WebKit)
+import WebKit
+#endif
 
 public struct FlowCanvas<
     NodeData: Sendable & Hashable,
@@ -17,6 +20,9 @@ public struct FlowCanvas<
     private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
     private var accessoryAnimation: Animation? = .spring(duration: 0.25, bounce: 0.05)
+    private var liveNodeActivationPredicate: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool = { node, store in
+        store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
+    }
     private var registeredDropTypes: [String] = []
     private var dropHandler: (@MainActor @Sendable (_ event: CanvasDropEvent) -> Bool)? = nil
 
@@ -130,6 +136,23 @@ public struct FlowCanvas<
         return copy
     }
 
+    // MARK: - Live Node Activation
+
+    /// Overrides the predicate that decides which nodes are active for the
+    /// live overlay layer.
+    ///
+    /// The default predicate returns `true` when the node is selected or
+    /// hovered. Apps that want a different policy (e.g., keep a node live
+    /// while a media player is playing, or suspend live rendering during a
+    /// connection draft) should supply their own.
+    public func liveNodeActivation(
+        _ isActive: @escaping (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool
+    ) -> FlowCanvas {
+        var copy = self
+        copy.liveNodeActivationPredicate = isActive
+        return copy
+    }
+
     // MARK: - Drop Destination
 
     /// Configures the canvas as a drop destination.
@@ -237,6 +260,8 @@ public struct FlowCanvas<
         } symbols: {
             ForEach(store.nodes) { node in
                 nodeContentBuilder(node, nodeRenderContext(for: node))
+                    .environment(\.flowNodeRenderPhase, .rasterize)
+                    .environment(\.flowNodeID, node.id)
                     .tag(node.id)
             }
             if let edgeContentBuilder {
@@ -275,6 +300,9 @@ public struct FlowCanvas<
         }
 
         let hasAccessory = nodeAccessoryBuilder != nil || edgeAccessoryBuilder != nil
+        let snapshotWriter: @MainActor (String, FlowNodeSnapshot) -> Void = { [store] id, snap in
+            store.setNodeSnapshot(snap, for: id)
+        }
 
         #if os(macOS)
         let hostView = CanvasHostView(
@@ -321,9 +349,16 @@ public struct FlowCanvas<
             canvasView
         }
 
-        if hasAccessory {
-            ZStack {
-                hostView
+        ZStack {
+            hostView
+            LiveNodeOverlay(
+                store: store,
+                canvasSize: size,
+                nodeContent: nodeContentBuilder,
+                renderContext: { node in nodeRenderContext(for: node) },
+                activation: liveNodeActivationPredicate
+            )
+            if hasAccessory {
                 AccessoryOverlay(
                     store: store,
                     canvasSize: size,
@@ -334,9 +369,8 @@ public struct FlowCanvas<
                     animation: accessoryAnimation
                 )
             }
-        } else {
-            hostView
         }
+        .environment(\.flowLiveNodeSnapshotWriter, snapshotWriter)
         #else
         let hostView = CanvasHostView(
             onPan: { delta in
@@ -360,9 +394,16 @@ public struct FlowCanvas<
             }
         }
 
-        if hasAccessory {
-            ZStack {
-                hostView
+        ZStack {
+            hostView
+            LiveNodeOverlay(
+                store: store,
+                canvasSize: size,
+                nodeContent: nodeContentBuilder,
+                renderContext: { node in nodeRenderContext(for: node) },
+                activation: liveNodeActivationPredicate
+            )
+            if hasAccessory {
                 AccessoryOverlay(
                     store: store,
                     canvasSize: size,
@@ -373,9 +414,8 @@ public struct FlowCanvas<
                     animation: accessoryAnimation
                 )
             }
-        } else {
-            hostView
         }
+        .environment(\.flowLiveNodeSnapshotWriter, snapshotWriter)
         #endif
     }
 
@@ -598,6 +638,14 @@ public struct FlowCanvas<
         // Iterate back-to-front (reverse of front-to-back cache) for correct draw order
         for index in store.nodeIndicesFrontToBack.reversed() {
             let node = store.nodes[index]
+
+            // Skip rasterized draw for nodes that are active in the live overlay
+            // layer, otherwise the native view and its frozen snapshot paint
+            // on top of each other.
+            if liveNodeActivationPredicate(node, store) {
+                continue
+            }
+
             let screenOrigin = viewport.canvasToScreen(node.position)
 
             // Expand draw rect to include handle protrusion
@@ -953,11 +1001,15 @@ public struct FlowCanvas<
     }
 
     private func nodeRenderContext(for node: FlowNode<NodeData>) -> NodeRenderContext {
-        guard let draft = store.connectionDraft,
-              draft.targetNodeID == node.id else {
-            return NodeRenderContext()
-        }
-        return NodeRenderContext(connectedHandleID: draft.targetHandleID)
+        let connectedHandleID: String? = {
+            guard let draft = store.connectionDraft,
+                  draft.targetNodeID == node.id else { return nil }
+            return draft.targetHandleID
+        }()
+        return NodeRenderContext(
+            connectedHandleID: connectedHandleID,
+            snapshot: store.nodeSnapshots[node.id]
+        )
     }
 
     private func draftConnectionTarget(
@@ -2377,3 +2429,182 @@ private struct ResizableFlowPreview: View {
 #Preview("FlowCanvas - Resize API") {
     ResizableFlowPreview()
 }
+
+// MARK: - Live Node Preview (WKWebView)
+
+#if canImport(WebKit)
+
+private struct WebPreviewData: Sendable, Hashable {
+    let url: URL
+    let title: String
+}
+
+/// Holds the WKWebView instances that back the live overlay nodes so the
+/// preview can call `takeSnapshot` on them independently of SwiftUI's
+/// view lifecycle. Once a node's overlay appears, its WKWebView lands in
+/// here and survives subsequent activation toggles.
+@MainActor
+@Observable
+private final class WebViewBag {
+    var webViews: [String: WKWebView] = [:]
+}
+
+#if os(iOS)
+private struct WebNodeRepresentable: UIViewRepresentable {
+    let nodeID: String
+    let url: URL
+    let bag: WebViewBag
+
+    func makeUIView(context: Context) -> WKWebView {
+        if let existing = bag.webViews[nodeID] {
+            existing.removeFromSuperview()
+            return existing
+        }
+        let wv = WKWebView()
+        wv.load(URLRequest(url: url))
+        bag.webViews[nodeID] = wv
+        return wv
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+}
+#elseif os(macOS)
+private struct WebNodeRepresentable: NSViewRepresentable {
+    let nodeID: String
+    let url: URL
+    let bag: WebViewBag
+
+    func makeNSView(context: Context) -> WKWebView {
+        if let existing = bag.webViews[nodeID] {
+            existing.removeFromSuperview()
+            return existing
+        }
+        let wv = WKWebView()
+        wv.load(URLRequest(url: url))
+        bag.webViews[nodeID] = wv
+        return wv
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+}
+#endif
+
+private struct LiveOverlayFlowPreview: View {
+
+    @State private var bag = WebViewBag()
+    @State private var store: FlowStore<WebPreviewData> = {
+        FlowStore<WebPreviewData>(
+            nodes: [
+                FlowNode(
+                    id: "apple",
+                    position: CGPoint(x: 60, y: 80),
+                    size: CGSize(width: 360, height: 240),
+                    data: WebPreviewData(
+                        url: URL(string: "https://www.apple.com")!,
+                        title: "apple.com"
+                    )
+                ),
+                FlowNode(
+                    id: "developer",
+                    position: CGPoint(x: 520, y: 140),
+                    size: CGSize(width: 360, height: 240),
+                    data: WebPreviewData(
+                        url: URL(string: "https://developer.apple.com")!,
+                        title: "developer.apple.com"
+                    )
+                ),
+            ],
+            edges: [
+                FlowEdge(
+                    id: "e1",
+                    sourceNodeID: "apple",
+                    sourceHandleID: "source",
+                    targetNodeID: "developer",
+                    targetHandleID: "target"
+                ),
+            ]
+        )
+    }()
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            // `.manual` capture: WKWebView cannot be rendered off-screen
+            // by ImageRenderer, so the app takes WKWebView snapshots
+            // itself and writes them to the store.
+            FlowCanvas(store: store) { node, ctx in
+                LiveNode(node: node, context: ctx, capture: .manual) {
+                    WebNodeRepresentable(
+                        nodeID: node.id,
+                        url: node.data.url,
+                        bag: bag
+                    )
+                    .task(id: node.id) {
+                        await snapshotLoop(nodeID: node.id)
+                    }
+                } placeholder: {
+                    VStack(spacing: 8) {
+                        ProgressView()
+                        Text(node.data.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.secondary.opacity(0.08))
+                }
+            }
+            .liveNodeActivation { node, store in
+                store.selectedNodeIDs.contains(node.id)
+                    || store.hoveredNodeID == node.id
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("WebView Live Node").font(.headline)
+                Text("Hover or select a node to activate the live WKWebView.")
+                Text("Snapshots are captured every second while active; the rasterized path replays the last one.")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .padding(10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .padding(12)
+        }
+    }
+
+    @MainActor
+    private func snapshotLoop(nodeID: String) async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            if Task.isCancelled { return }
+            await captureSnapshot(nodeID: nodeID)
+        }
+    }
+
+    @MainActor
+    private func captureSnapshot(nodeID: String) async {
+        guard let webView = bag.webViews[nodeID] else { return }
+        let config = WKSnapshotConfiguration()
+        do {
+            let image = try await webView.takeSnapshot(configuration: config)
+            #if os(iOS)
+            guard let cgImage = image.cgImage else { return }
+            let scale = image.scale
+            #elseif os(macOS)
+            var rect = CGRect(origin: .zero, size: image.size)
+            guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return }
+            let scale = CGFloat(cgImage.width) / max(image.size.width, 1)
+            #endif
+            store.setNodeSnapshot(
+                FlowNodeSnapshot(cgImage: cgImage, scale: scale),
+                for: nodeID
+            )
+        } catch {
+            // snapshot failed (e.g., view not yet ready); skip this tick
+        }
+    }
+}
+
+#Preview("FlowCanvas - Live Node (WKWebView)") {
+    LiveOverlayFlowPreview()
+}
+
+#endif

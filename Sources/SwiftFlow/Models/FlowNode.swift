@@ -18,9 +18,14 @@ public enum NodePersistence: String, Codable, Sendable, Hashable {
 
 public struct NodeRenderContext: Sendable, Hashable {
     public let connectedHandleID: String?
+    public let snapshot: FlowNodeSnapshot?
 
-    public init(connectedHandleID: String? = nil) {
+    public init(
+        connectedHandleID: String? = nil,
+        snapshot: FlowNodeSnapshot? = nil
+    ) {
         self.connectedHandleID = connectedHandleID
+        self.snapshot = snapshot
     }
 }
 

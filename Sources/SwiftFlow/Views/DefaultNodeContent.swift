@@ -42,18 +42,7 @@ public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
                 }
                 .padding(inset)
 
-            ForEach(node.handles, id: \.id) { handle in
-                FlowHandle(handle.id, type: handle.type, position: handle.position)
-                    .overlay {
-                        if context.connectedHandleID == handle.id {
-                            Circle()
-                                .strokeBorder(Color.accentColor, lineWidth: 2)
-                                .padding(-4)
-                        }
-                    }
-                    .scaleEffect(context.connectedHandleID == handle.id ? 1.12 : 1.0)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: handleAlignment(handle.position))
-            }
+            FlowNodeHandles(node: node, context: context)
         }
         .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
         .opacity(contentOpacity)
@@ -166,12 +155,4 @@ public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
         }
     }
 
-    private func handleAlignment(_ position: HandlePosition) -> Alignment {
-        switch position {
-        case .top: .top
-        case .bottom: .bottom
-        case .left: .leading
-        case .right: .trailing
-        }
-    }
 }

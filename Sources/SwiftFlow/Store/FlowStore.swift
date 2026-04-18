@@ -17,6 +17,13 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public private(set) var dropTargetEdgeID: String?
     public var configuration: FlowConfiguration
 
+    /// Rasterized snapshots keyed by node id, used by the Canvas rasterize
+    /// path when a node is currently inactive. Written by `LiveNode` (for
+    /// SwiftUI content) or by the app (for `.manual` captures of native
+    /// views). Not part of undo: this is a rendering cache, not document
+    /// state.
+    public private(set) var nodeSnapshots: [String: FlowNodeSnapshot] = [:]
+
     // MARK: - Lookup Tables
 
     public private(set) var nodeLookup: [String: FlowNode<Data>] = [:]
@@ -94,6 +101,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     public func removeNode(_ nodeID: String) {
         nodePositionAnimations.removeValue(forKey: nodeID)
+        nodeSnapshots.removeValue(forKey: nodeID)
         let capturedNode = nodeLookup[nodeID]
         let cascadedEdges = edges.filter { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
 
@@ -164,6 +172,24 @@ public final class FlowStore<Data: Sendable & Hashable> {
         nodes[index].size = size
         nodeLookup[nodeID] = nodes[index]
         emitNodeChange(.dimensions(nodeID: nodeID, size: size))
+    }
+
+    // MARK: - Node Snapshots
+
+    /// Store a rasterized snapshot for a node. Overwrites any prior entry.
+    /// Not registered with undo — snapshots are a rendering cache.
+    public func setNodeSnapshot(_ snapshot: FlowNodeSnapshot, for nodeID: String) {
+        nodeSnapshots[nodeID] = snapshot
+    }
+
+    /// Drop the cached snapshot for a single node.
+    public func clearNodeSnapshot(for nodeID: String) {
+        nodeSnapshots.removeValue(forKey: nodeID)
+    }
+
+    /// Drop every cached snapshot. Useful when bulk-reloading a document.
+    public func clearAllNodeSnapshots() {
+        nodeSnapshots.removeAll(keepingCapacity: false)
     }
 
     // MARK: - Move Completion (Undo)

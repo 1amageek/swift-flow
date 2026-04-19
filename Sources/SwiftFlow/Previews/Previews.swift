@@ -1,8 +1,9 @@
+#if DEBUG
+
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
 import MapKit
-import SwiftFlow
 
 // MARK: - Generic Preview
 
@@ -1830,3 +1831,5 @@ private struct LiveFlowPreview: View {
     LiveFlowPreview()
         .frame(minWidth: 1200, minHeight: 800)
 }
+
+#endif

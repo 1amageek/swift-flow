@@ -42,6 +42,15 @@ final class LiveNodeActivationCoordinator {
     /// updates so render state animates with intent + capture completion.
     private(set) var renderedActive: Set<String> = []
 
+    /// IDs of nodes whose `nodeContent` currently contains a `LiveNode`.
+    /// Populated by `LiveNodeOverlay` from the aggregated
+    /// `LiveNodePresenceKey` preference. Canvas's rasterize draw and the
+    /// overlay's hit-testing / opacity gating both read this to leave
+    /// plain (non-live) nodes alone — the Canvas keeps drawing them and
+    /// the overlay keeps their row at opacity 0, so Canvas-level
+    /// gestures (drag, selection) pass through untouched.
+    var liveNodeIDs: Set<String> = []
+
     /// Last observed intent per node (used only for edge detection).
     private var intent: [String: Bool] = [:]
 
@@ -123,6 +132,15 @@ final class LiveNodeActivationCoordinator {
     /// same source of truth.
     func isRenderedActive(_ nodeID: String) -> Bool {
         renderedActive.contains(nodeID)
+    }
+
+    /// Whether the Canvas's rasterize path should skip this node because
+    /// the overlay is currently drawing a live view for it. Plain
+    /// (non-live) rows answer `false` even when hovered/selected, so
+    /// Canvas keeps drawing them — otherwise the node would disappear
+    /// the instant the user moves the cursor over it.
+    func overlayIsDrawing(_ nodeID: String) -> Bool {
+        renderedActive.contains(nodeID) && liveNodeIDs.contains(nodeID)
     }
 }
 

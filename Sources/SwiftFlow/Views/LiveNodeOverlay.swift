@@ -18,6 +18,15 @@ import SwiftUI
 /// toggles and eliminates the teardown/reload flicker that happens when
 /// the subtree is conditionally removed.
 ///
+/// ## Plain-node pass-through
+///
+/// Not every row the overlay hosts contains a `LiveNode` — callers mix
+/// live nodes with plain content (e.g. `.resizable` nodes). Rows that do
+/// contain a `LiveNode` publish their ID via ``LiveNodePresenceKey``;
+/// rows absent from the aggregated set keep `opacity = 0` and hit testing
+/// off even when "active," so Canvas-level drag / selection gestures
+/// don't get swallowed by the invisible overlay layer.
+///
 /// ## Two-phase deactivation
 ///
 /// Activation "rendered" state is owned by
@@ -96,6 +105,15 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                 // state during body evaluation would invalidate our own
                 // read of `renderedActive` and loop the render.
                 let intent = activation(node, store)
+                // Only rows that actually host a `LiveNode` should
+                // participate in overlay hit testing / opacity — plain
+                // nodes would otherwise swallow Canvas-level drags the
+                // moment they become "active" (hover or selection).
+                // `overlayIsDrawing` combines `renderedActive` with live
+                // presence and is the single source of truth shared with
+                // `FlowCanvas.drawNodes` (which skips Canvas rasterize
+                // exactly when the overlay is drawing instead).
+                let shouldShow = coordinator.overlayIsDrawing(node.id)
                 let isActive = coordinator.isRenderedActive(node.id)
                 let screenOrigin = viewport.canvasToScreen(node.position)
                 nodeContent(node, renderContext(node))
@@ -111,8 +129,8 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                         x: screenOrigin.x - handleInset * viewport.zoom,
                         y: screenOrigin.y - handleInset * viewport.zoom
                     )
-                    .opacity(isActive ? 1 : 0)
-                    .allowsHitTesting(isActive)
+                    .opacity(shouldShow ? 1 : 0)
+                    .allowsHitTesting(shouldShow)
                     .onChange(of: intent, initial: true) { _, newIntent in
                         coordinator.update(nodeID: node.id, intent: newIntent)
                     }
@@ -120,5 +138,10 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
         .environment(\.liveNodeActivationCoordinator, coordinator)
+        .onPreferenceChange(LiveNodePresenceKey.self) { ids in
+            Task { @MainActor in
+                coordinator.liveNodeIDs = ids
+            }
+        }
     }
 }

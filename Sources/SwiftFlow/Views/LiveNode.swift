@@ -120,6 +120,12 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
                 registerCaptureHandler()
             }
             .modifier(PeriodicCaptureModifier(capture: capture, isActive: isActive, captureNow: captureNow, nodeID: nodeID))
+            // Signals to `LiveNodeOverlay` that this row actually hosts a
+            // live view. Rows whose `nodeContent` does not contain a
+            // `LiveNode` (e.g. `.resizable` plain nodes) emit the empty
+            // default, so the overlay can keep them at opacity 0 with hit
+            // testing disabled — letting Canvas-level gestures through.
+            .preference(key: LiveNodePresenceKey.self, value: [nodeID])
     }
 
     /// Identity string that rebuilds the registration task whenever
@@ -260,6 +266,21 @@ extension LiveNode where Placeholder == FlowDefaultPlaceholder {
             live: live,
             placeholder: { FlowDefaultPlaceholder() }
         )
+    }
+}
+
+// MARK: - Presence preference
+
+/// Collects the IDs of nodes whose `nodeContent` actually contains a
+/// `LiveNode` in the live phase. `LiveNodeOverlay` reads this to decide,
+/// per-row, whether to pay the hit-testing cost of the hosting layer —
+/// plain (non-live) nodes leave their row at opacity 0 with hit testing
+/// disabled so Canvas-level drag / selection gestures pass straight
+/// through.
+public struct LiveNodePresenceKey: PreferenceKey {
+    public static let defaultValue: Set<String> = []
+    public static func reduce(value: inout Set<String>, nextValue: () -> Set<String>) {
+        value.formUnion(nextValue())
     }
 }
 

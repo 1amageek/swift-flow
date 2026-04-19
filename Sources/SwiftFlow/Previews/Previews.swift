@@ -1339,13 +1339,26 @@ private struct WebNodeRepresentable: NSViewRepresentable {
 
 // MARK: - Map support
 
-/// Retains MKMapView instances across overlay remount (viewport culling,
-/// scroll-out → scroll-in) so panning / zooming state isn't lost when the
-/// node briefly leaves the visible rect.
+/// Tracks the currently-mounted MKMapView per node (so snapshot capture
+/// can read its region) and persists the last-seen `MKCoordinateRegion`
+/// across mount cycles (so pan / zoom state survives activation toggles
+/// without having to reuse the MKMapView instance itself).
+///
+/// Reusing MKMapView across mount cycles — i.e. caching the instance,
+/// detaching it via `dismantleNSView`, and reattaching it via a later
+/// `makeNSView` — stalls the CAMetalLayer tile pipeline. The symptom is
+/// that the MKMapView chrome (Apple Maps attribution label) renders but
+/// the map tiles stay blank. Storing only the `region` (a value type)
+/// avoids that while preserving the user-visible state.
 @MainActor
 @Observable
 private final class MapViewBag {
+    /// The MKMapView currently mounted for a node. Populated in
+    /// `makeNSView/makeUIView`, cleared in `dismantleNSView/dismantleUIView`.
     var mapViews: [String: MKMapView] = [:]
+    /// Last-seen region per node. Persists across mount cycles so pan /
+    /// zoom state isn't lost when a node deactivates.
+    var regions: [String: MKCoordinateRegion] = [:]
 }
 
 #if os(iOS)
@@ -1356,30 +1369,46 @@ private struct MapNodeRepresentable: UIViewRepresentable {
     let bag: MapViewBag
 
     func makeUIView(context: Context) -> MKMapView {
-        let mv: MKMapView
-        if let existing = bag.mapViews[nodeID] {
-            existing.removeFromSuperview()
-            mv = existing
-        } else {
-            mv = MKMapView()
-            mv.setRegion(
-                MKCoordinateRegion(
-                    center: initialCoordinate,
-                    latitudinalMeters: 3000,
-                    longitudinalMeters: 3000
-                ),
-                animated: false
-            )
-            bag.mapViews[nodeID] = mv
-        }
+        let mv = MKMapView()
+        let region = bag.regions[nodeID] ?? MKCoordinateRegion(
+            center: initialCoordinate,
+            latitudinalMeters: 3000,
+            longitudinalMeters: 3000
+        )
+        mv.setRegion(region, animated: false)
         mv.layer.cornerRadius = cornerRadius
         mv.layer.masksToBounds = true
+        bag.mapViews[nodeID] = mv
         return mv
     }
 
     func updateUIView(_ mv: MKMapView, context: Context) {
         if mv.layer.cornerRadius != cornerRadius {
             mv.layer.cornerRadius = cornerRadius
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(nodeID: nodeID, bag: bag)
+    }
+
+    @MainActor
+    final class Coordinator {
+        let nodeID: String
+        let bag: MapViewBag
+
+        init(nodeID: String, bag: MapViewBag) {
+            self.nodeID = nodeID
+            self.bag = bag
+        }
+    }
+
+    static func dismantleUIView(_ mv: MKMapView, coordinator: Coordinator) {
+        MainActor.assumeIsolated {
+            coordinator.bag.regions[coordinator.nodeID] = mv.region
+            if coordinator.bag.mapViews[coordinator.nodeID] === mv {
+                coordinator.bag.mapViews.removeValue(forKey: coordinator.nodeID)
+            }
         }
     }
 }
@@ -1391,25 +1420,17 @@ private struct MapNodeRepresentable: NSViewRepresentable {
     let bag: MapViewBag
 
     func makeNSView(context: Context) -> MKMapView {
-        let mv: MKMapView
-        if let existing = bag.mapViews[nodeID] {
-            existing.removeFromSuperview()
-            mv = existing
-        } else {
-            mv = MKMapView()
-            mv.setRegion(
-                MKCoordinateRegion(
-                    center: initialCoordinate,
-                    latitudinalMeters: 3000,
-                    longitudinalMeters: 3000
-                ),
-                animated: false
-            )
-            bag.mapViews[nodeID] = mv
-        }
+        let mv = MKMapView()
+        let region = bag.regions[nodeID] ?? MKCoordinateRegion(
+            center: initialCoordinate,
+            latitudinalMeters: 3000,
+            longitudinalMeters: 3000
+        )
+        mv.setRegion(region, animated: false)
         mv.wantsLayer = true
         mv.layer?.cornerRadius = cornerRadius
         mv.layer?.masksToBounds = true
+        bag.mapViews[nodeID] = mv
         return mv
     }
 
@@ -1418,18 +1439,47 @@ private struct MapNodeRepresentable: NSViewRepresentable {
             mv.layer?.cornerRadius = cornerRadius
         }
     }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(nodeID: nodeID, bag: bag)
+    }
+
+    @MainActor
+    final class Coordinator {
+        let nodeID: String
+        let bag: MapViewBag
+
+        init(nodeID: String, bag: MapViewBag) {
+            self.nodeID = nodeID
+            self.bag = bag
+        }
+    }
+
+    static func dismantleNSView(_ mv: MKMapView, coordinator: Coordinator) {
+        MainActor.assumeIsolated {
+            coordinator.bag.regions[coordinator.nodeID] = mv.region
+            if coordinator.bag.mapViews[coordinator.nodeID] === mv {
+                coordinator.bag.mapViews.removeValue(forKey: coordinator.nodeID)
+            }
+        }
+    }
 }
 #endif
 
 /// Only mounts `MapNodeRepresentable` while the node is rendered active.
 ///
-/// The overlay applies `opacity(0)` to inactive nodes, which pauses the
-/// `CAMetalLayer` tile pipeline used by `MKMapView` — when the ancestor
-/// opacity later flips back to `1` the Metal drawable never resumes and
-/// the live map shows blank. Keeping the representable out of the view
-/// tree while inactive sidesteps the issue entirely; the `MKMapView`
-/// instance itself is retained in `MapViewBag` so pan / zoom state is
-/// preserved across mount cycles.
+/// The overlay applies `opacity(0)` to inactive nodes. Gating the mount
+/// on `isActive` keeps `MKMapView` out of the view tree during those
+/// phases so the ancestor opacity never reaches its `CAMetalLayer`,
+/// which avoids a plausible Metal-pipeline pause on the opacity edge.
+/// The observed failure that actually drove this design was different:
+/// caching an `MKMapView` across mount cycles — detaching it via
+/// `dismantleNSView` and reattaching a later `makeNSView` — stalls the
+/// Metal tile pipeline. The symptom is the MKMapView UI chrome (Apple
+/// Maps attribution label) renders but the map tiles stay blank.
+/// `MapNodeRepresentable` therefore builds a fresh `MKMapView` on every
+/// mount and persists only the `MKCoordinateRegion` in `MapViewBag`, so
+/// pan / zoom state is restored without reusing the instance.
 private struct MapNodeLive: View {
     let nodeID: String
     let initialCoordinate: CLLocationCoordinate2D
@@ -1703,6 +1753,8 @@ private struct LiveFlowPreview: View {
         let options = MKMapSnapshotter.Options()
         if let mv = mapViewBag.mapViews[node.id] {
             options.region = mv.region
+        } else if let region = mapViewBag.regions[node.id] {
+            options.region = region
         } else {
             options.region = MKCoordinateRegion(
                 center: initialCoordinate,

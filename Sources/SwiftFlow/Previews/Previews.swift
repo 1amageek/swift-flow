@@ -1580,13 +1580,8 @@ private struct LiveFlowPreview: View {
                 nodeBody(for: node, ctx: ctx)
             }
             .liveNodeActivation { node, store in
-                switch node.data {
-                case .web, .map:
-                    return store.selectedNodeIDs.contains(node.id)
-                        || store.hoveredNodeID == node.id
-                case .resizable:
-                    return false
-                }
+                store.selectedNodeIDs.contains(node.id)
+                    || store.hoveredNodeID == node.id
             }
             .overlay {
                 ForEach(Array(store.selectedNodeIDs), id: \.self) { id in
@@ -1598,8 +1593,10 @@ private struct LiveFlowPreview: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Live Node Preview").font(.headline)
-                Text("Hover or select a web/map node to activate the live representable.")
-                Text("The header bar uses FlowNodeDragHandle so node-move still works above scrollable content.")
+                Text("Hover or select a node to switch from snapshot to its live view.")
+                Text("Web / map headers use FlowNodeDragHandle so node-move works above scroll-consuming bodies.")
+                    .foregroundStyle(.secondary)
+                Text("The orange node runs a TimelineView and moves like any plain node (no handle needed).")
                     .foregroundStyle(.secondary)
                 Text("Select the orange node and drag a corner handle to resize.")
                     .foregroundStyle(.secondary)
@@ -1616,26 +1613,39 @@ private struct LiveFlowPreview: View {
         let inset = FlowHandle.diameter / 2
         let cornerRadius: CGFloat = 12
 
-        VStack(spacing: 0) {
-            // Header strip — drag here to move the node even when the body
-            // is a scroll-consuming representable (WKWebView / MKMapView).
-            FlowNodeDragHandle(node: node, context: ctx) {
-                HStack(spacing: 6) {
-                    Image(systemName: node.data.headerSymbol)
-                        .font(.caption)
-                    Text(node.data.title)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .frame(maxWidth: .infinity)
-                .background(node.data.headerColor.opacity(0.9))
-            }
+        Group {
+            switch node.data {
+            case .web, .map:
+                // The body is a scroll-consuming representable
+                // (WKWebView / MKMapView) that swallows drags while
+                // active. A `FlowNodeDragHandle` header carves a
+                // pass-through strip whose drags fall to Canvas so
+                // node-move still works.
+                VStack(spacing: 0) {
+                    FlowNodeDragHandle(node: node, context: ctx) {
+                        HStack(spacing: 6) {
+                            Image(systemName: node.data.headerSymbol)
+                                .font(.caption)
+                            Text(node.data.title)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity)
+                        .background(node.data.headerColor.opacity(0.9))
+                    }
 
-            liveBody(for: node, ctx: ctx, cornerRadius: cornerRadius)
+                    liveBody(for: node, ctx: ctx, cornerRadius: cornerRadius)
+                }
+
+            case .resizable:
+                // Plain (non-live) node — Canvas-level drag already
+                // covers the whole surface, so no handle is needed.
+                liveBody(for: node, ctx: ctx, cornerRadius: cornerRadius)
+            }
         }
         .frame(width: node.size.width, height: node.size.height)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
@@ -1685,7 +1695,7 @@ private struct LiveFlowPreview: View {
             }
 
         case let .resizable(_, color):
-            resizableBody(color: color, size: node.size)
+            resizableBody(node: node, ctx: ctx, color: color)
         }
     }
 
@@ -1700,7 +1710,11 @@ private struct LiveFlowPreview: View {
         .background(Color.secondary.opacity(0.08))
     }
 
-    private func resizableBody(color colorName: String, size: CGSize) -> some View {
+    private func resizableBody(
+        node: FlowNode<LivePreviewData>,
+        ctx: NodeRenderContext,
+        color colorName: String
+    ) -> some View {
         let color: Color = {
             switch colorName {
             case "blue":   return .blue
@@ -1709,17 +1723,36 @@ private struct LiveFlowPreview: View {
             default:       return .gray
             }
         }()
-        return ZStack {
-            color.opacity(0.15)
-            VStack(spacing: 4) {
-                Text("\(Int(size.width)) × \(Int(size.height))")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                Text("Select & drag a corner")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        let size = node.size
+        return LiveNode(node: node, context: ctx) {
+            TimelineView(.animation) { tl in
+                let t = tl.date.timeIntervalSinceReferenceDate
+                ZStack {
+                    color.opacity(0.12 + 0.08 * (0.5 + 0.5 * sin(t * 2)))
+                    VStack(spacing: 4) {
+                        Text("\(Int(size.width)) × \(Int(size.height))")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                        Text("Select & drag a corner")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Circle()
+                        .trim(from: 0, to: 0.25)
+                        .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .rotationEffect(.degrees(t * 180))
+                        .frame(width: 22, height: 22)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(8)
+                }
             }
         }
+        // The TimelineView body is purely visual — no gestures to consume.
+        // Disable hit testing so overlay drags fall through to the Canvas
+        // and the node moves like any plain (non-live) node. Consistent
+        // with the rule: a `FlowNodeDragHandle` is only needed when the
+        // live content itself swallows drags (WKWebView / MKMapView).
+        .allowsHitTesting(false)
     }
 
     @MainActor

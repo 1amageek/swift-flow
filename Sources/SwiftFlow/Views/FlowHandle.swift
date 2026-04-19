@@ -2,8 +2,10 @@ import SwiftUI
 
 public struct FlowHandle: View {
 
-    /// Handle diameter used for node layout.
-    static let diameter: CGFloat = 14
+    /// Handle diameter used for node layout. Public so callers can reserve
+    /// matching inset space in `nodeContent` (e.g. `.padding(FlowHandle.diameter / 2)`)
+    /// per the documented live-node composition pattern.
+    public static let diameter: CGFloat = 14
 
     let handleID: String
     let type: HandleType

@@ -309,6 +309,45 @@ struct WebViewRepresentable: UIViewRepresentable {
 }
 ```
 
+### Node Drag and Hit Testing
+
+Node drag is always driven by the Canvas's own gesture — multi-selection moves, zoom normalization, and undo registration all live on the Canvas side. What changes between nodes is whether drag events ever *reach* the Canvas.
+
+- **Plain (non-LiveNode) rows.** The overlay row is kept at `opacity = 0` with hit testing disabled, so pointer events pass straight through to the Canvas. No extra work is required.
+- **`LiveNode` with non-interactive content** (e.g. a `TimelineView` driving an animation). The content does not consume drags, but the active overlay row is still hit-testable so other gestures could route to it. Mark the live view as pass-through so drags reach the Canvas:
+
+  ```swift
+  LiveNode(node: node, context: ctx) {
+      TimelineView(.animation) { tl in
+          ClockFace(date: tl.date)
+      }
+  }
+  .allowsHitTesting(false)
+  ```
+
+- **`LiveNode` with drag-consuming content** (`WKWebView`, `MKMapView`, `AVPlayerView`, or any view containing a `ScrollView` / pan gesture). The inner view swallows drags while active and the Canvas gesture never fires. Wrap a dedicated grip region — typically a title bar — in `FlowNodeDragHandle` so drags on that region fall through to the Canvas instead:
+
+  ```swift
+  FlowCanvas(store: store) { node, ctx in
+      VStack(spacing: 0) {
+          FlowNodeDragHandle(node: node, context: ctx) {
+              Text(node.data.title)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .padding(6)
+                  .background(.thinMaterial)
+          }
+          LiveNode(node: node, context: ctx) {
+              WebNodeRepresentable(url: node.data.url)
+          }
+      }
+      .frame(width: node.size.width, height: node.size.height)
+      .padding(FlowHandle.diameter / 2)
+      .overlay { FlowNodeHandles(node: node, context: ctx) }
+  }
+  ```
+
+  `FlowNodeDragHandle` does **not** implement its own drag — it is a pass-through region (`.allowsHitTesting(false)`) that lets the Canvas's gesture handle the move. The behavior is therefore identical whether the user grabs the handle strip or drags a plain node, which also means a single `FlowStore.moveNode` call path and a single undo entry.
+
 ## Custom Edge Views
 
 Provide an `edgeContent` closure to render each edge as a SwiftUI view. The closure receives a `FlowEdge` and an `EdgeGeometry` with pre-computed path and position data in local coordinates.

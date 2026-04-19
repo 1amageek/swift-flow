@@ -3,29 +3,52 @@ import SwiftUI
 /// Hosts live node views (WKWebView, MKMapView, AVPlayerView, etc.)
 /// on top of the Canvas.
 ///
-/// Placed in a ZStack above the Canvas so each overlay is a real SwiftUI
-/// view rather than a Canvas symbol, letting native representables retain
-/// their own rendering loop, scroll views, video decoders, and input
-/// handling.
+/// Placed in a ZStack above the Canvas so each active node is a real
+/// SwiftUI view rather than a Canvas symbol, letting native representables
+/// retain their own rendering loop, scroll views, video decoders, and input
+/// handling while visible.
 ///
-/// Re-evaluates the caller-supplied `nodeContent` closure for every node
-/// inside the viewport with `flowNodeRenderPhase = .live` injected, so
-/// any `LiveNode` declared inside that closure automatically switches
-/// from its rasterize branch to its live branch. Nodes the overlay
-/// considers inactive stay mounted at `opacity(0)` with hit testing
-/// disabled — this preserves WKWebView / MKMapView identity (page load
-/// state, scroll position, JS state, player state) across active↔inactive
-/// toggles and eliminates the teardown/reload flicker that happens when
-/// the subtree is conditionally removed.
+/// ## Mount policy
+///
+/// A row is mounted here only when it is **active** (user is hovering or
+/// selecting it) or **warming up** (no snapshot has been captured yet).
+/// Everything else falls through to the Canvas `resolveSymbol` path,
+/// which draws the stored snapshot image via `FlowNodeSnapshot` — cheap,
+/// and the reason large flows with dozens of idle LiveNodes stay
+/// responsive during pan/zoom. Mounting every visible LiveNode (even at
+/// opacity 0) paid SwiftUI layout, transform, and `TimelineView` tick
+/// costs for nodes the user couldn't see.
+///
+/// The warmup mount is what initially boots native representables —
+/// WKWebView starts loading, MKMapView fetches tiles, AVPlayer prepares
+/// an item — so their `.manual(capture:)` handler has a surface to pull
+/// a snapshot from. Once `context.snapshot` is non-nil the row unmounts
+/// and the Canvas takes over drawing.
+///
+/// Trade-off: WKWebView / MKMapView / AVPlayer identity is **not**
+/// preserved by SwiftUI across deactivation — each activation remounts
+/// the representable. Callers typically keep the underlying object alive
+/// outside SwiftUI (e.g. a bag keyed by node ID) so remount reuses the
+/// same instance, preserving page / region / playback state. For
+/// SwiftUI-only `LiveNode`s the snapshot captured on deactivation keeps
+/// the rasterize frame visually identical, so the swap is seamless.
+///
+/// ## Intent driver
+///
+/// The activation predicate is still evaluated for every viewport-visible
+/// node (cheap — just a bool per node) and forwarded to the coordinator,
+/// so predicate true-edges trigger the mount. Only the heavy subtree —
+/// `nodeContent(...)` with `.live` phase injected — is gated on
+/// `isRenderedActive`.
 ///
 /// ## Plain-node pass-through
 ///
-/// Not every row the overlay hosts contains a `LiveNode` — callers mix
-/// live nodes with plain content (e.g. `.resizable` nodes). Rows that do
-/// contain a `LiveNode` publish their ID via ``LiveNodePresenceKey``;
-/// rows absent from the aggregated set keep `opacity = 0` and hit testing
-/// off even when "active," so Canvas-level drag / selection gestures
-/// don't get swallowed by the invisible overlay layer.
+/// Not every active row contains a `LiveNode` — callers mix live nodes
+/// with plain content (e.g. `.resizable` nodes). Rows that actually host
+/// a `LiveNode` publish their ID via ``LiveNodePresenceKey``; rows absent
+/// from the aggregated set keep `opacity = 0` and hit testing off, so
+/// Canvas-level drag / selection gestures pass through to the node
+/// underneath.
 ///
 /// ## Two-phase deactivation
 ///
@@ -34,14 +57,9 @@ import SwiftUI
 /// When the predicate flips `true → false` the coordinator awaits the
 /// `LiveNode`-registered capture handler before lowering `renderedActive`
 /// — so the rasterize path has a fresh snapshot the instant the overlay
-/// fades. The overlay reads `coordinator.renderedActive` for opacity / hit
-/// testing, and feeds each body evaluation back in with `update(...)` so
-/// predicate edges trigger the coordinator's transitions.
-///
-/// Off-screen nodes are culled from the overlay so we don't pay for
-/// WKWebView page loads, SwiftUI subtree work, or capture costs that
-/// nobody can see. Nodes scrolled back into view remount fresh and
-/// re-seed their snapshot via `LiveNode`'s mount-time capture.
+/// unmounts. The overlay reads `coordinator.renderedActive` to decide
+/// which rows to mount, and feeds each body evaluation back in with
+/// `update(...)` so predicate edges trigger the coordinator's transitions.
 ///
 /// The overlay layer itself does not paint any background, so empty space
 /// between active nodes passes pointer events through to the Canvas
@@ -99,41 +117,26 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
 
         ZStack(alignment: .topLeading) {
             ForEach(visibleNodes, id: \.id) { node in
-                // Read the predicate as a read-only signal during body.
-                // Mutation of `coordinator.renderedActive` happens only
-                // inside `.onChange` below — writing to `@Observable`
-                // state during body evaluation would invalidate our own
-                // read of `renderedActive` and loop the render.
+                // Evaluate the activation predicate for every visible
+                // node (cheap — just a bool) and forward the edge to the
+                // coordinator. This is what promotes a node into
+                // `renderedActive` on first hover/select. Mutation of
+                // `@Observable` state happens inside `.onChange`, never
+                // during body, to avoid self-invalidating the render.
                 let intent = activation(node, store)
-                // Only rows that actually host a `LiveNode` should
-                // participate in overlay hit testing / opacity — plain
-                // nodes would otherwise swallow Canvas-level drags the
-                // moment they become "active" (hover or selection).
-                // `overlayIsDrawing` combines `renderedActive` with live
-                // presence and is the single source of truth shared with
-                // `FlowCanvas.drawNodes` (which skips Canvas rasterize
-                // exactly when the overlay is drawing instead).
-                let shouldShow = coordinator.overlayIsDrawing(node.id)
-                let isActive = coordinator.isRenderedActive(node.id)
-                let screenOrigin = viewport.canvasToScreen(node.position)
-                nodeContent(node, renderContext(node))
-                    .environment(\.flowNodeRenderPhase, .live)
-                    .environment(\.flowNodeID, node.id)
-                    .environment(\.isFlowNodeActive, isActive)
-                    .frame(
-                        width: node.size.width + handleInset * 2,
-                        height: node.size.height + handleInset * 2
-                    )
-                    .scaleEffect(viewport.zoom, anchor: .topLeading)
-                    .offset(
-                        x: screenOrigin.x - handleInset * viewport.zoom,
-                        y: screenOrigin.y - handleInset * viewport.zoom
-                    )
-                    .opacity(shouldShow ? 1 : 0)
-                    .allowsHitTesting(shouldShow)
-                    .onChange(of: intent, initial: true) { _, newIntent in
-                        coordinator.update(nodeID: node.id, intent: newIntent)
-                    }
+                let isRenderedActive = coordinator.isRenderedActive(node.id)
+                LiveNodeOverlayRow(
+                    node: node,
+                    viewport: viewport,
+                    handleInset: handleInset,
+                    isRenderedActive: isRenderedActive,
+                    shouldShow: coordinator.overlayIsDrawing(node.id),
+                    renderContext: renderContext(node),
+                    nodeContent: nodeContent
+                )
+                .onChange(of: intent, initial: true) { _, newIntent in
+                    coordinator.update(nodeID: node.id, intent: newIntent)
+                }
             }
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
@@ -142,6 +145,63 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
             Task { @MainActor in
                 coordinator.liveNodeIDs = ids
             }
+        }
+    }
+}
+
+/// One row in the overlay. Mounts `nodeContent` in the `.live` phase for
+/// two reasons:
+///
+/// - **Active**: the coordinator says the user is hovering/selecting this
+///   node, so the live view must replace the Canvas snapshot.
+/// - **Warmup**: the node has no snapshot yet, so the live view must mount
+///   invisibly long enough to produce one — this is the only path that
+///   boots up native representables (WKWebView load, MKMapView tile
+///   fetch, AVPlayer item setup) whose `.manual(capture:)` handler cannot
+///   synthesize a snapshot without the live view being in the view
+///   hierarchy. Once `context.snapshot` is populated the row unmounts and
+///   the Canvas `resolveSymbol` path takes over drawing.
+///
+/// Rows that are neither active nor warming collapse to a zero-size
+/// spacer, so the Canvas rasterize path is the sole drawer for idle
+/// LiveNodes.
+private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>: View {
+
+    let node: FlowNode<NodeData>
+    let viewport: Viewport
+    let handleInset: CGFloat
+    let isRenderedActive: Bool
+    let shouldShow: Bool
+    let renderContext: NodeRenderContext
+    let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
+
+    var body: some View {
+        // Mount while active OR while the node still has no snapshot —
+        // the latter lets native representables load their content and
+        // seed the snapshot, after which the row unmounts and the Canvas
+        // draws from the snapshot instead.
+        let needsWarmup = renderContext.snapshot == nil
+        let shouldMount = isRenderedActive || needsWarmup
+
+        if shouldMount {
+            let screenOrigin = viewport.canvasToScreen(node.position)
+            nodeContent(node, renderContext)
+                .environment(\.flowNodeRenderPhase, .live)
+                .environment(\.flowNodeID, node.id)
+                .environment(\.isFlowNodeActive, isRenderedActive)
+                .frame(
+                    width: node.size.width + handleInset * 2,
+                    height: node.size.height + handleInset * 2
+                )
+                .scaleEffect(viewport.zoom, anchor: .topLeading)
+                .offset(
+                    x: screenOrigin.x - handleInset * viewport.zoom,
+                    y: screenOrigin.y - handleInset * viewport.zoom
+                )
+                .opacity(shouldShow ? 1 : 0)
+                .allowsHitTesting(shouldShow)
+        } else {
+            Color.clear.frame(width: 0, height: 0)
         }
     }
 }

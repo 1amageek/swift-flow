@@ -95,37 +95,65 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
         }
     }
 
-    /// The overlay keeps this subtree mounted across activation toggles
-    /// so native views (WKWebView / MKMapView / AVPlayerView) don't
-    /// reload. Capture on deactivation is routed through
+    /// Mounted only while the coordinator marks the row rendered-active;
+    /// deactivation unmounts the subtree so idle LiveNodes don't pay
+    /// per-frame SwiftUI / transform / TimelineView costs during canvas
+    /// pan and zoom.
+    ///
+    /// Capture on deactivation is routed through
     /// ``LiveNodeActivationCoordinator`` so the snapshot is written
-    /// **before** the overlay fades and the Canvas repaints — otherwise
-    /// the stale cached image flashes between deactivation and the
-    /// async capture completing.
+    /// **before** `renderedActive` flips false — the Canvas `resolveSymbol`
+    /// path then draws the fresh snapshot as the first visible frame
+    /// after unmount, with no stale-thumbnail flash.
+    ///
+    /// ## Snapshot backdrop
+    ///
+    /// The overlay and Canvas hand off via `overlayIsDrawing` — Canvas
+    /// stops drawing the rasterized snapshot exactly when the overlay
+    /// becomes opaque. That handoff is sub-frame clean on the SwiftUI
+    /// side, but compositor-backed surfaces (WKWebView / MKMapView /
+    /// AVPlayer) need at least one display commit to publish their
+    /// layer's backing store. Painting the stored snapshot behind the
+    /// live view fills that one-frame gap — when Canvas stops drawing,
+    /// the overlay already has an identical still frame under the live
+    /// content, so there is nothing to flicker. Opaque live content
+    /// (WKWebView, MKMapView, most TimelineView scenes) fully covers the
+    /// backdrop once composited; fully-transparent animated live content
+    /// would ghost the backdrop, but LiveNode is not the right tool for
+    /// that case anyway since the rasterize phase cannot represent
+    /// animation.
     @ViewBuilder
     private var liveBody: some View {
         let nodeID = node.id
-        // Re-register on every inputs change so the handler closure
-        // always sees the latest `node.size`, caller-provided manual
-        // closure, etc. `SwiftUI.View` is a value type, so the closure
-        // registered from a stale `self` would otherwise capture inputs
-        // from the first mount only. The task id is cheap; registration
-        // itself is idempotent (just a dictionary overwrite).
-        live()
-            .onAppear { seedSnapshotIfNeeded() }
-            .onDisappear {
-                coordinator?.unregisterCapture(for: nodeID)
+        ZStack {
+            if let snap = context.snapshot {
+                Image(snap.cgImage, scale: snap.scale, label: Text(verbatim: ""))
+                    .resizable()
+                    .interpolation(.high)
+                    .allowsHitTesting(false)
             }
-            .task(id: captureRegistrationIdentity) {
-                registerCaptureHandler()
-            }
-            .modifier(PeriodicCaptureModifier(capture: capture, isActive: isActive, captureNow: captureNow, nodeID: nodeID))
-            // Signals to `LiveNodeOverlay` that this row actually hosts a
-            // live view. Rows whose `nodeContent` does not contain a
-            // `LiveNode` (e.g. `.resizable` plain nodes) emit the empty
-            // default, so the overlay can keep them at opacity 0 with hit
-            // testing disabled — letting Canvas-level gestures through.
-            .preference(key: LiveNodePresenceKey.self, value: [nodeID])
+            // Re-register on every inputs change so the handler closure
+            // always sees the latest `node.size`, caller-provided manual
+            // closure, etc. `SwiftUI.View` is a value type, so the closure
+            // registered from a stale `self` would otherwise capture inputs
+            // from the first mount only. The task id is cheap; registration
+            // itself is idempotent (just a dictionary overwrite).
+            live()
+                .onAppear { seedSnapshotIfNeeded() }
+                .onDisappear {
+                    coordinator?.unregisterCapture(for: nodeID)
+                }
+                .task(id: captureRegistrationIdentity) {
+                    registerCaptureHandler()
+                }
+                .modifier(PeriodicCaptureModifier(capture: capture, isActive: isActive, captureNow: captureNow, nodeID: nodeID))
+        }
+        // Signals to `LiveNodeOverlay` that this row actually hosts a
+        // live view. Rows whose `nodeContent` does not contain a
+        // `LiveNode` (e.g. `.resizable` plain nodes) emit the empty
+        // default, so the overlay can keep them at opacity 0 with hit
+        // testing disabled — letting Canvas-level gestures through.
+        .preference(key: LiveNodePresenceKey.self, value: [nodeID])
     }
 
     /// Identity string that rebuilds the registration task whenever
@@ -177,21 +205,21 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
     ///
     /// - `.onDeactivation` / `.periodic`: synchronous `ImageRenderer`
     ///   produces a thumbnail immediately.
-    /// - `.manual(capture:)`: the library can't rasterize native views;
-    ///   kicks off the caller's async handler so they can write the
-    ///   first snapshot as soon as their native view (WKWebView,
-    ///   MKMapView, …) is ready. Subsequent mounts reuse the stored
-    ///   snapshot.
+    /// - `.manual(capture:)`: the library cannot know when the caller's
+    ///   native view (WKWebView, MKMapView, AVPlayerView, …) is ready
+    ///   to produce a meaningful frame — calling the handler on mount
+    ///   would capture an unloaded / blank surface and pollute the
+    ///   snapshot cache. The caller signals readiness themselves (e.g.
+    ///   `WKNavigationDelegate.didFinish`, `MKMapViewDelegate.mapViewDidFinishRenderingMap`,
+    ///   `AVPlayer` status KVO) and invokes capture from there.
     @MainActor
     private func seedSnapshotIfNeeded() {
         guard context.snapshot == nil else { return }
         switch capture {
         case .onDeactivation, .periodic:
             captureNow()
-        case .manual(let handler):
-            Task { @MainActor in
-                await handler()
-            }
+        case .manual:
+            break
         }
     }
 

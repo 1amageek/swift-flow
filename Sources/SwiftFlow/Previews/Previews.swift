@@ -1269,6 +1269,43 @@ private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
     }
 }
 
+/// WKWebView subclass that wakes its own WebContent compositor when it
+/// reattaches to a window.
+///
+/// `LiveNode`'s mount policy unmounts a row on deactivation and remounts
+/// it on reactivation. For pure SwiftUI content that is fine, but native
+/// views backed by a separate process (WKWebView, MKMapView, AVPlayer)
+/// enter a dormant state while detached — the view's layer is valid but
+/// no new frame has been pushed, so the surface draws as solid black
+/// until something triggers a new paint.
+///
+/// `didMoveToWindow` is the authoritative signal for reattachment on
+/// both platforms. Touching a layout-sensitive DOM property from JS
+/// forces the WebContent process to reflow and paint, which publishes a
+/// fresh IOSurface on the next compositor tick. Belongs here (in the
+/// view subclass) rather than in the library — the mismatch is between
+/// WKWebView's own lifecycle assumptions and SwiftUI's mount/unmount
+/// semantics, and WKWebView is the thing that knows it just reattached.
+private final class LiveWebView: WKWebView {
+    #if os(iOS)
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else { return }
+        wakeCompositor()
+    }
+    #elseif os(macOS)
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        wakeCompositor()
+    }
+    #endif
+
+    private func wakeCompositor() {
+        evaluateJavaScript("document.documentElement.offsetHeight") { _, _ in }
+    }
+}
+
 #if os(iOS)
 private struct WebNodeRepresentable: UIViewRepresentable {
     let nodeID: String
@@ -1286,7 +1323,7 @@ private struct WebNodeRepresentable: UIViewRepresentable {
             existing.removeFromSuperview()
             wv = existing
         } else {
-            wv = WKWebView()
+            wv = LiveWebView()
             wv.load(URLRequest(url: url))
             bag.webViews[nodeID] = wv
         }
@@ -1321,7 +1358,7 @@ private struct WebNodeRepresentable: NSViewRepresentable {
             existing.removeFromSuperview()
             wv = existing
         } else {
-            wv = WKWebView()
+            wv = LiveWebView()
             wv.load(URLRequest(url: url))
             bag.webViews[nodeID] = wv
         }

@@ -303,6 +303,12 @@ public struct FlowCanvas<
         .onChange(of: undoManager) { _, newValue in
             store.undoManager = newValue
         }
+        // Preference collection lives inside `LiveNodeOverlay`'s
+        // hidden registrar pass — Canvas's `symbols:` block does not
+        // reliably propagate PreferenceKey values to this outer
+        // scope, and it lazy-skips evaluating symbols that
+        // `drawNodes` doesn't resolve, so attaching the listener
+        // here would deadlock the bootstrap gate.
 
         let hasAccessory = nodeAccessoryBuilder != nil || edgeAccessoryBuilder != nil
         let snapshotWriter: @MainActor (String, FlowNodeSnapshot) -> Void = { [store] id, snap in

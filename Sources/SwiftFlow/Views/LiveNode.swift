@@ -35,6 +35,7 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
     private let node: FlowNode<NodeData>
     private let context: NodeRenderContext
     private let capture: LiveNodeCapture
+    private let mountPolicy: LiveNodeMountPolicy
     private let live: () -> Live
     private let placeholder: () -> Placeholder
 
@@ -49,12 +50,14 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
         node: FlowNode<NodeData>,
         context: NodeRenderContext,
         capture: LiveNodeCapture = .onDeactivation,
+        mountPolicy: LiveNodeMountPolicy = .onActivation,
         @ViewBuilder live: @escaping () -> Live,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) {
         self.node = node
         self.context = context
         self.capture = capture
+        self.mountPolicy = mountPolicy
         self.live = live
         self.placeholder = placeholder
     }
@@ -62,7 +65,19 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
     public var body: some View {
         // Pure phase dispatch. No frame, padding, clip, or other styling
         // — the caller composes sizing and visual treatment outside.
+        //
+        // Preferences are published from the outer body (not just the
+        // live phase) so the Canvas's `symbols:` pass — which evaluates
+        // every LiveNode in `.rasterize` once per render — also feeds
+        // the coordinator's presence / policy maps. This is what closes
+        // the bootstrap window: by the time `LiveNodeOverlay` decides
+        // a row's mount policy, the policy preference has already been
+        // delivered through the Canvas's render, so a `.persistent`
+        // WKWebView never has to mount at opacity 0 on first appear
+        // (which strands its WebContent compositor in a dormant state).
         contentBody
+            .preference(key: LiveNodePresenceKey.self, value: [node.id])
+            .preference(key: LiveNodeMountPolicyKey.self, value: [node.id: mountPolicy])
     }
 
     @ViewBuilder
@@ -113,15 +128,29 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
     /// becomes opaque. That handoff is sub-frame clean on the SwiftUI
     /// side, but compositor-backed surfaces (WKWebView / MKMapView /
     /// AVPlayer) need at least one display commit to publish their
-    /// layer's backing store. Painting the stored snapshot behind the
-    /// live view fills that one-frame gap — when Canvas stops drawing,
-    /// the overlay already has an identical still frame under the live
-    /// content, so there is nothing to flicker. Opaque live content
-    /// (WKWebView, MKMapView, most TimelineView scenes) fully covers the
-    /// backdrop once composited; fully-transparent animated live content
-    /// would ghost the backdrop, but LiveNode is not the right tool for
-    /// that case anyway since the rasterize phase cannot represent
-    /// animation.
+    /// layer's backing store. For ``LiveNodeMountPolicy/onActivation``
+    /// rows we paint the stored snapshot behind the live view to fill
+    /// that one-frame gap — when Canvas stops drawing, the overlay
+    /// already has an identical still frame under the live content,
+    /// so there is nothing to flicker. Opaque live content (WKWebView,
+    /// MKMapView, most TimelineView scenes) fully covers the backdrop
+    /// once composited.
+    ///
+    /// ``LiveNodeMountPolicy/persistent`` rows skip the backdrop
+    /// entirely — Canvas always skips drawing for them, so no handoff
+    /// happens to begin with. More importantly, **adding** the Image
+    /// to the ZStack the first time `context.snapshot` becomes non-nil
+    /// (typically a few seconds after mount, when a `.manual` capture
+    /// handler finally writes its first snapshot) causes SwiftUI to
+    /// reassign the structural identity of `live()` at the next
+    /// position. For pure-SwiftUI content that's invisible, but for an
+    /// `NSViewRepresentable` / `UIViewRepresentable` it triggers a
+    /// fresh `makeNSView` which detaches and reattaches the underlying
+    /// `WKWebView` — within the same window, so
+    /// `viewDidMoveToWindow` never fires and the WebContent process's
+    /// compositor wake is missed. The visible result is that the web
+    /// view goes solid black several seconds into the session, exactly
+    /// when the snapshot capture lands.
     @ViewBuilder
     private var liveBody: some View {
         let nodeID = node.id
@@ -148,12 +177,6 @@ public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: V
                 }
                 .modifier(PeriodicCaptureModifier(capture: capture, isActive: isActive, captureNow: captureNow, nodeID: nodeID))
         }
-        // Signals to `LiveNodeOverlay` that this row actually hosts a
-        // live view. Rows whose `nodeContent` does not contain a
-        // `LiveNode` (e.g. `.resizable` plain nodes) emit the empty
-        // default, so the overlay can keep them at opacity 0 with hit
-        // testing disabled — letting Canvas-level gestures through.
-        .preference(key: LiveNodePresenceKey.self, value: [nodeID])
     }
 
     /// Identity string that rebuilds the registration task whenever
@@ -309,6 +332,24 @@ public struct LiveNodePresenceKey: PreferenceKey {
     public static let defaultValue: Set<String> = []
     public static func reduce(value: inout Set<String>, nextValue: () -> Set<String>) {
         value.formUnion(nextValue())
+    }
+}
+
+// MARK: - Mount policy preference
+
+/// Aggregates the per-node mount policy that ``LiveNode`` declares for
+/// itself, so `LiveNodeOverlay` can decide whether each row mounts on
+/// activation only or stays mounted for the life of its viewport
+/// presence. Last-write-wins on the rare merge — a node ID emitting
+/// from two LiveNodes would already be a programmer error caught by
+/// the deduplicated `LiveNodePresenceKey`.
+public struct LiveNodeMountPolicyKey: PreferenceKey {
+    public static let defaultValue: [String: LiveNodeMountPolicy] = [:]
+    public static func reduce(
+        value: inout [String: LiveNodeMountPolicy],
+        nextValue: () -> [String: LiveNodeMountPolicy]
+    ) {
+        value.merge(nextValue()) { _, new in new }
     }
 }
 

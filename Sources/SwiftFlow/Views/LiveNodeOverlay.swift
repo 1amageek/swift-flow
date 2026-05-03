@@ -94,6 +94,15 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
         // so reordering preserves SwiftUI view identity (and with it,
         // WKWebView / MKMapView / AVPlayer instances already registered
         // for each node).
+        //
+        // `.persistent` policy nodes are exempt from the cull once their
+        // policy preference has reached the coordinator — keeping the
+        // WKWebView / MKMapView mounted while panned off-screen avoids
+        // the `removeFromSuperview` → CARemoteLayerClient stall on
+        // re-entry. The first activation still has to come through the
+        // viewport (the node must mount once to publish its policy), but
+        // after that the row stays mounted regardless of viewport
+        // position.
         let margin = Self.preloadMargin
         let topLeft = viewport.screenToCanvas(CGPoint(x: -margin, y: -margin))
         let bottomRight = viewport.screenToCanvas(
@@ -106,17 +115,63 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
             height: bottomRight.y - topLeft.y
         )
 
+        let persistentNodeIDs = Set(
+            coordinator.liveNodeMountPolicies
+                .compactMap { $0.value == .persistent ? $0.key : nil }
+        )
+
         let visibleNodes = store.nodeIndicesFrontToBack
             .reversed()
             .compactMap { idx -> FlowNode<NodeData>? in
                 let node = store.nodes[idx]
+                if persistentNodeIDs.contains(node.id) { return node }
                 let nodeRect = CGRect(origin: node.position, size: node.size)
                     .insetBy(dx: -handleInset, dy: -handleInset)
                 return visibleCanvasRect.intersects(nodeRect) ? node : nil
             }
 
+        // Bootstrap gate: skip mounting rows until the coordinator has
+        // received at least one preference cycle. Without this, a
+        // `.persistent` row would mount on the very first frame
+        // (before the registrar pass below has propagated the
+        // policy) and its WKWebView would land at opacity 0 — long
+        // enough for the WebContent compositor to go dormant.
+        // Skipping here costs exactly one frame; on frame two the
+        // policy is in hand and the WKWebView opens at opacity 1
+        // from the start.
+        let bootstrapped = coordinator.hasReceivedFirstPreferenceCycle
         ZStack(alignment: .topLeading) {
-            ForEach(visibleNodes, id: \.id) { node in
+            // Registrar pass: walk every node in the store at 0×0 /
+            // opacity 0 to drive each LiveNode's outer `.preference`
+            // emission. This is the only reliable place to feed the
+            // coordinator's presence / mount-policy maps:
+            //
+            // - The Canvas's `symbols:` block does not propagate
+            //   `PreferenceKey` values to its outer modifier scope
+            //   (and may not even evaluate symbols whose ID
+            //   `drawNodes` doesn't resolve — `.persistent` nodes
+            //   short-circuit drawing entirely, so their symbol body
+            //   never runs).
+            // - The visible-rows ForEach below is viewport-culled and
+            //   gated on `bootstrapped`, so it cannot bootstrap
+            //   itself.
+            //
+            // The registrar evaluates `nodeContent` for every node,
+            // but at zero size with hit-testing off and opacity 0,
+            // so the user's card body, handles, and decorations
+            // build their view tree without producing any pixels.
+            // LiveNode in `.rasterize` phase renders its snapshot
+            // image (or a `FlowDefaultPlaceholder`) — both cheap.
+            ForEach(store.nodes) { node in
+                nodeContent(node, renderContext(node))
+                    .environment(\.flowNodeRenderPhase, .rasterize)
+                    .environment(\.flowNodeID, node.id)
+                    .frame(width: 0, height: 0)
+                    .opacity(0)
+                    .allowsHitTesting(false)
+            }
+
+            ForEach(bootstrapped ? visibleNodes : [], id: \.id) { node in
                 // Evaluate the activation predicate for every visible
                 // node (cheap — just a bool) and forward the edge to the
                 // coordinator. This is what promotes a node into
@@ -125,12 +180,15 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                 // during body, to avoid self-invalidating the render.
                 let intent = activation(node, store)
                 let isRenderedActive = coordinator.isRenderedActive(node.id)
+                let mountPolicy = coordinator.mountPolicy(for: node.id)
                 LiveNodeOverlayRow(
                     node: node,
                     viewport: viewport,
                     handleInset: handleInset,
                     isRenderedActive: isRenderedActive,
                     shouldShow: coordinator.overlayIsDrawing(node.id),
+                    isHittable: coordinator.overlayIsHittable(node.id),
+                    mountPolicy: mountPolicy,
                     renderContext: renderContext(node),
                     nodeContent: nodeContent
                 )
@@ -141,9 +199,14 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
         .environment(\.liveNodeActivationCoordinator, coordinator)
-        .onPreferenceChange(LiveNodePresenceKey.self) { ids in
+        .onPreferenceChange(LiveNodePresenceKey.self) { [coordinator] ids in
             Task { @MainActor in
                 coordinator.liveNodeIDs = ids
+            }
+        }
+        .onPreferenceChange(LiveNodeMountPolicyKey.self) { [coordinator] policies in
+            Task { @MainActor in
+                coordinator.liveNodeMountPolicies = policies
             }
         }
     }
@@ -172,17 +235,36 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     let handleInset: CGFloat
     let isRenderedActive: Bool
     let shouldShow: Bool
+    let isHittable: Bool
+    let mountPolicy: LiveNodeMountPolicy
     let renderContext: NodeRenderContext
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
 
-    var body: some View {
-        // Mount while active OR while the node still has no snapshot —
-        // the latter lets native representables load their content and
-        // seed the snapshot, after which the row unmounts and the Canvas
-        // draws from the snapshot instead.
-        let needsWarmup = renderContext.snapshot == nil
-        let shouldMount = isRenderedActive || needsWarmup
+    /// Mount decision depends on the per-node mount policy:
+    ///
+    /// - `.onActivation` (default): mount while active OR while the
+    ///   node still has no snapshot — the latter lets native
+    ///   representables load their content and seed the snapshot,
+    ///   after which the row unmounts and the Canvas draws from the
+    ///   snapshot instead.
+    /// - `.persistent`: stay mounted as long as the node is in
+    ///   viewport. The activation predicate then only toggles
+    ///   `shouldShow` (opacity / hit-testing). Required for native
+    ///   representables backed by a separate process — their
+    ///   `removeFromSuperview` propagates `viewDidMoveToWindow(nil)`
+    ///   into the remote-layer subtree and stalls the
+    ///   CARemoteLayerClient / CAMetalLayer pipeline; keeping the
+    ///   row mounted avoids that detach entirely.
+    private var shouldMount: Bool {
+        switch mountPolicy {
+        case .onActivation:
+            return isRenderedActive || renderContext.snapshot == nil
+        case .persistent:
+            return true
+        }
+    }
 
+    var body: some View {
         if shouldMount {
             let screenOrigin = viewport.canvasToScreen(node.position)
             nodeContent(node, renderContext)
@@ -199,7 +281,7 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                     y: screenOrigin.y - handleInset * viewport.zoom
                 )
                 .opacity(shouldShow ? 1 : 0)
-                .allowsHitTesting(shouldShow)
+                .allowsHitTesting(isHittable)
         } else {
             Color.clear.frame(width: 0, height: 0)
         }

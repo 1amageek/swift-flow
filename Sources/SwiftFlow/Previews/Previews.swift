@@ -1287,6 +1287,26 @@ private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
 /// WKWebView's own lifecycle assumptions and SwiftUI's mount/unmount
 /// semantics, and WKWebView is the thing that knows it just reattached.
 private final class LiveWebView: WKWebView {
+
+    /// Disable WebKit's window-occlusion driven render throttling.
+    ///
+    /// Xcode's SwiftUI Preview hosts the canvas in an NSWindow that does
+    /// **not** have `NSWindowOcclusionState.visible` set — even while the
+    /// preview canvas is fully on screen. WebKit reads that flag to
+    /// pause WebContent rendering when it thinks the window is hidden,
+    /// so within ~1s of load the WebContent process stops publishing
+    /// IOSurfaces and the layer goes black.
+    ///
+    /// `_setWindowOcclusionDetectionEnabled:` is the SPI that turns
+    /// off that pause. SPI is acceptable here because this entire file
+    /// is `#if DEBUG`-gated and never ships to the App Store.
+    func disableWindowOcclusionDetection() {
+        let selector = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
+        if responds(to: selector) {
+            perform(selector, with: NSNumber(value: false))
+        }
+    }
+
     #if os(iOS)
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -1302,7 +1322,7 @@ private final class LiveWebView: WKWebView {
     #endif
 
     private func wakeCompositor() {
-        evaluateJavaScript("document.documentElement.offsetHeight") { _, _ in }
+        evaluateJavaScript("document.documentElement.offsetHeight", completionHandler: nil)
     }
 }
 
@@ -1358,9 +1378,11 @@ private struct WebNodeRepresentable: NSViewRepresentable {
             existing.removeFromSuperview()
             wv = existing
         } else {
-            wv = LiveWebView()
-            wv.load(URLRequest(url: url))
-            bag.webViews[nodeID] = wv
+            let lwv = LiveWebView()
+            lwv.disableWindowOcclusionDetection()
+            lwv.load(URLRequest(url: url))
+            bag.webViews[nodeID] = lwv
+            wv = lwv
         }
         wv.navigationDelegate = context.coordinator
         wv.wantsLayer = true
@@ -1701,7 +1723,8 @@ private struct LiveFlowPreview: View {
             LiveNode(
                 node: node,
                 context: ctx,
-                capture: .manual(capture: { await captureWebSnapshot(nodeID: nodeID) })
+                capture: .manual(capture: { await captureWebSnapshot(nodeID: nodeID) }),
+                mountPolicy: .persistent
             ) {
                 WebNodeRepresentable(
                     nodeID: nodeID,
@@ -1720,7 +1743,8 @@ private struct LiveFlowPreview: View {
             LiveNode(
                 node: node,
                 context: ctx,
-                capture: .manual(capture: { await captureMapSnapshot(for: node) })
+                capture: .manual(capture: { await captureMapSnapshot(for: node) }),
+                mountPolicy: .persistent
             ) {
                 MapNodeLive(
                     nodeID: node.id,
@@ -1796,7 +1820,9 @@ private struct LiveFlowPreview: View {
 
     @MainActor
     private func captureWebSnapshot(nodeID: String) async {
-        guard let webView = webViewBag.webViews[nodeID] else { return }
+        guard let webView = webViewBag.webViews[nodeID] else {
+            return
+        }
         let config = WKSnapshotConfiguration()
         do {
             let image = try await webView.takeSnapshot(configuration: config)
@@ -1805,7 +1831,9 @@ private struct LiveFlowPreview: View {
             let scale = image.scale
             #elseif os(macOS)
             var rect = CGRect(origin: .zero, size: image.size)
-            guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return }
+            guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
+                return
+            }
             let scale = CGFloat(cgImage.width) / max(image.size.width, 1)
             #endif
             store.setNodeSnapshot(
@@ -1813,7 +1841,6 @@ private struct LiveFlowPreview: View {
                 for: nodeID
             )
         } catch {
-            // snapshot failed (e.g., view not yet ready); skip this tick
         }
     }
 

@@ -43,13 +43,36 @@ final class LiveNodeActivationCoordinator {
     private(set) var renderedActive: Set<String> = []
 
     /// IDs of nodes whose `nodeContent` currently contains a `LiveNode`.
-    /// Populated by `LiveNodeOverlay` from the aggregated
+    /// Populated by `FlowCanvas` from the aggregated
     /// `LiveNodePresenceKey` preference. Canvas's rasterize draw and the
     /// overlay's hit-testing / opacity gating both read this to leave
     /// plain (non-live) nodes alone — the Canvas keeps drawing them and
     /// the overlay keeps their row at opacity 0, so Canvas-level
     /// gestures (drag, selection) pass through untouched.
-    var liveNodeIDs: Set<String> = []
+    var liveNodeIDs: Set<String> = [] {
+        didSet { hasReceivedFirstPreferenceCycle = true }
+    }
+
+    /// Latches `true` the first time either presence or policy
+    /// preferences land. The overlay holds off mounting any row until
+    /// this is set, so a `.persistent` LiveNode's WKWebView never
+    /// briefly mounts at opacity 0 (which would let the WebContent
+    /// compositor go dormant before the policy preference arrives).
+    /// Plain flows with no live nodes never trip this — there's
+    /// nothing the overlay would mount in that case anyway.
+    private(set) var hasReceivedFirstPreferenceCycle: Bool = false
+
+    /// Per-node mount policy declared by each `LiveNode` via
+    /// `LiveNodeMountPolicyKey`. `LiveNodeOverlayRow` consults this to
+    /// decide whether a row may unmount on deactivation or must stay in
+    /// the SwiftUI tree for the life of its viewport presence. Nodes
+    /// missing from the dictionary fall back to
+    /// ``LiveNodeMountPolicy/onActivation`` — the bootstrap window
+    /// before the first preference cycle lands, and any plain
+    /// (non-live) row.
+    var liveNodeMountPolicies: [String: LiveNodeMountPolicy] = [:] {
+        didSet { hasReceivedFirstPreferenceCycle = true }
+    }
 
     /// Last observed intent per node (used only for edge detection).
     private var intent: [String: Bool] = [:]
@@ -134,13 +157,45 @@ final class LiveNodeActivationCoordinator {
         renderedActive.contains(nodeID)
     }
 
+    /// Per-node mount policy as published by each `LiveNode`. Falls back
+    /// to ``LiveNodeMountPolicy/onActivation`` for nodes that haven't
+    /// surfaced a policy yet (the bootstrap window before the first
+    /// `LiveNodeMountPolicyKey` preference cycle lands) and for plain
+    /// non-live rows.
+    func mountPolicy(for nodeID: String) -> LiveNodeMountPolicy {
+        liveNodeMountPolicies[nodeID] ?? .onActivation
+    }
+
     /// Whether the Canvas's rasterize path should skip this node because
     /// the overlay is currently drawing a live view for it. Plain
     /// (non-live) rows answer `false` even when hovered/selected, so
     /// Canvas keeps drawing them — otherwise the node would disappear
     /// the instant the user moves the cursor over it.
+    ///
+    /// **Poster pattern**: every LiveNode (regardless of mount policy)
+    /// is drawn by the Canvas as a snapshot poster while inactive, and
+    /// only swaps to the live overlay view while the user is hovering
+    /// or has selected it. ``LiveNodeMountPolicy/persistent`` differs
+    /// from ``LiveNodeMountPolicy/onActivation`` only in **mount**
+    /// behaviour — the underlying native view stays in the SwiftUI
+    /// tree so its CARemoteLayer pipeline doesn't stall — not in
+    /// **drawing** behaviour. That is why this method ignores mount
+    /// policy and answers solely on `renderedActive`.
     func overlayIsDrawing(_ nodeID: String) -> Bool {
-        renderedActive.contains(nodeID) && liveNodeIDs.contains(nodeID)
+        guard liveNodeIDs.contains(nodeID) else { return false }
+        return renderedActive.contains(nodeID)
+    }
+
+    /// Whether the overlay row should accept hit-testing. Distinct from
+    /// ``overlayIsDrawing(_:)`` because `.persistent` rows stay drawn
+    /// (opacity 1) the whole time they are mounted, but their underlying
+    /// `WKWebView` / `MKMapView` should only intercept scroll / click
+    /// while the user is actually interacting with the node. When the
+    /// row is not active, hit-testing is off so a click passes through
+    /// to Canvas — letting selection trigger and, in turn, activate the
+    /// row through the predicate.
+    func overlayIsHittable(_ nodeID: String) -> Bool {
+        liveNodeIDs.contains(nodeID) && renderedActive.contains(nodeID)
     }
 }
 

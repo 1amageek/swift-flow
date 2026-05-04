@@ -1278,30 +1278,22 @@ private extension LivePreviewPlatformImage {
 
 @MainActor
 private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
-    var snapshotContext: LiveNodeNativeSnapshotContext?
+    var onSnapshotReady: (FlowNodeSnapshot) -> Void
 
-    private var registeredWebViewID: ObjectIdentifier?
-
-    func registerCaptureIfNeeded(for webView: WKWebView) {
-        let id = ObjectIdentifier(webView)
-        guard registeredWebViewID != id else { return }
-        registeredWebViewID = id
-
-        snapshotContext?.registerCapture { [weak webView] in
-            await webView?.makeFlowNodeSnapshot()
-        }
-    }
-
-    func unregisterCapture() {
-        registeredWebViewID = nil
-        snapshotContext?.unregisterCapture()
+    init(onSnapshotReady: @escaping (FlowNodeSnapshot) -> Void) {
+        self.onSnapshotReady = onSnapshotReady
+        super.init()
     }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 250_000_000)
+            } catch {
+                return
+            }
             guard let snapshot = await webView.makeFlowNodeSnapshot() else { return }
-            self?.snapshotContext?.write(snapshot)
+            self?.onSnapshotReady(snapshot)
         }
     }
 }
@@ -1351,82 +1343,132 @@ private extension WKWebView {
 
 #if os(iOS)
 private struct WebNodeRepresentable: UIViewRepresentable {
-    @Environment(\.liveNodeNativeSnapshotContext) private var snapshotContext
-
+    let webView: LiveWebView
     let url: URL
     let cornerRadius: CGFloat
+    let onSnapshotReady: (FlowNodeSnapshot) -> Void
 
     func makeCoordinator() -> WebNodeCoordinator {
-        WebNodeCoordinator()
+        WebNodeCoordinator(onSnapshotReady: onSnapshotReady)
     }
 
     func makeUIView(context: Context) -> WKWebView {
-        context.coordinator.snapshotContext = snapshotContext
-
-        let webView = LiveWebView()
         webView.navigationDelegate = context.coordinator
         webView.layer.cornerRadius = cornerRadius
         webView.layer.masksToBounds = true
         webView.scrollView.layer.cornerRadius = cornerRadius
         webView.scrollView.layer.masksToBounds = true
-        webView.load(URLRequest(url: url))
 
-        context.coordinator.registerCaptureIfNeeded(for: webView)
+        if webView.url == nil {
+            webView.load(URLRequest(url: url))
+        }
 
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.snapshotContext = snapshotContext
+        context.coordinator.onSnapshotReady = onSnapshotReady
         webView.layer.cornerRadius = cornerRadius
         webView.scrollView.layer.cornerRadius = cornerRadius
-        context.coordinator.registerCaptureIfNeeded(for: webView)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: WebNodeCoordinator) {
-        coordinator.unregisterCapture()
         webView.navigationDelegate = nil
     }
 }
 #elseif os(macOS)
 private struct WebNodeRepresentable: NSViewRepresentable {
-    @Environment(\.liveNodeNativeSnapshotContext) private var snapshotContext
-
+    let webView: LiveWebView
     let url: URL
     let cornerRadius: CGFloat
+    let onSnapshotReady: (FlowNodeSnapshot) -> Void
 
     func makeCoordinator() -> WebNodeCoordinator {
-        WebNodeCoordinator()
+        WebNodeCoordinator(onSnapshotReady: onSnapshotReady)
     }
 
     func makeNSView(context: Context) -> WKWebView {
-        context.coordinator.snapshotContext = snapshotContext
-
-        let webView = LiveWebView()
-        webView.disableWindowOcclusionDetection()
         webView.navigationDelegate = context.coordinator
         webView.wantsLayer = true
         webView.layer?.cornerRadius = cornerRadius
         webView.layer?.masksToBounds = true
-        webView.load(URLRequest(url: url))
 
-        context.coordinator.registerCaptureIfNeeded(for: webView)
+        if webView.url == nil {
+            webView.load(URLRequest(url: url))
+        }
 
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        context.coordinator.snapshotContext = snapshotContext
+        context.coordinator.onSnapshotReady = onSnapshotReady
         webView.layer?.cornerRadius = cornerRadius
-        context.coordinator.registerCaptureIfNeeded(for: webView)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: WebNodeCoordinator) {
-        coordinator.unregisterCapture()
         webView.navigationDelegate = nil
     }
 }
 #endif
+
+// MARK: - Web node wrapper
+
+/// View that owns a stable `WKWebView` instance via `@StateObject`. The
+/// same instance is passed both to ``WebNodeRepresentable`` (for live
+/// rendering) and to the ``LiveNode/init(node:mount:snapshot:capture:content:placeholder:)``
+/// `capture: .custom` closure (for snapshot generation).
+private struct WebNodeView: View {
+
+    let node: FlowNode<LivePreviewData>
+    let url: URL
+    let title: String
+    let cornerRadius: CGFloat
+    let store: FlowStore<LivePreviewData>
+
+    @StateObject private var ref = WebNodeRef()
+
+    var body: some View {
+        LiveNode(
+            node: node,
+            mount: .persistent,
+            snapshot: .onDeactivation,
+            capture: .custom { [ref] in
+                await ref.webView.makeFlowNodeSnapshot()
+            }
+        ) {
+            WebNodeRepresentable(
+                webView: ref.webView,
+                url: url,
+                cornerRadius: cornerRadius,
+                onSnapshotReady: { [store, nodeID = node.id] snapshot in
+                    store.setNodeSnapshot(snapshot, for: nodeID)
+                }
+            )
+        } placeholder: {
+            VStack(spacing: 8) {
+                ProgressView()
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.background)
+        }
+    }
+}
+
+@MainActor
+private final class WebNodeRef: ObservableObject {
+    let webView: LiveWebView
+
+    init() {
+        let v = LiveWebView()
+        #if os(macOS)
+        v.disableWindowOcclusionDetection()
+        #endif
+        self.webView = v
+    }
+}
 
 // MARK: - Live preview view
 
@@ -1498,7 +1540,7 @@ private struct LiveFlowPreview: View {
                 Text("Hover or select a node to switch from snapshot to its live view.")
                 Text("Web / map headers use FlowNodeDragHandle so node-move works above scroll-consuming bodies.")
                     .foregroundStyle(.secondary)
-                Text("Web nodes use .persistent + .nativeReadyDriven; map nodes use .remountOnActivation + .nativeManual.")
+                Text("Web nodes mount as .persistent with capture: .custom { webView snapshot }; map nodes use .remountOnActivation.")
                     .foregroundStyle(.secondary)
                 Text("Select the orange node and drag a corner handle to resize.")
                     .foregroundStyle(.secondary)
@@ -1515,7 +1557,8 @@ private struct LiveFlowPreview: View {
         LivePreviewNodeBody(
             node: node,
             context: context,
-            mapStateStore: mapStateStore
+            mapStateStore: mapStateStore,
+            store: store
         )
     }
 
@@ -1534,6 +1577,7 @@ private struct LivePreviewNodeBody: View {
     let node: FlowNode<LivePreviewData>
     let context: NodeRenderContext
     let mapStateStore: LiveMapNodeStateStore
+    let store: FlowStore<LivePreviewData>
 
     var body: some View {
         let inset = FlowHandle.diameter / 2
@@ -1551,16 +1595,13 @@ private struct LivePreviewNodeBody: View {
 
         switch node.data {
         case let .web(url, title):
-            LiveNode(node: node) {
-                WebNodeRepresentable(
-                    url: url,
-                    cornerRadius: cornerRadius
-                )
-            } placeholder: {
-                placeholderBody(title: title)
-            }
-            .liveNodeMount(.persistent)
-            .liveNodeSnapshot(.nativeReadyDriven)
+            WebNodeView(
+                node: node,
+                url: url,
+                title: title,
+                cornerRadius: cornerRadius,
+                store: store
+            )
             .overlay(alignment: .top) {
                 headerOverlay
             }
@@ -1606,17 +1647,6 @@ private struct LivePreviewNodeBody: View {
             .frame(maxWidth: .infinity)
             .background(node.data.headerColor.opacity(0.9))
         }
-    }
-
-    private func placeholderBody(title: String) -> some View {
-        VStack(spacing: 8) {
-            ProgressView()
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.background)
     }
 
     private func resizableBody(color colorName: String) -> some View {

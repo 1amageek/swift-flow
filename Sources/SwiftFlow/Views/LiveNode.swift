@@ -10,86 +10,67 @@ import SwiftUI
 /// through the environment, so the call site stays small:
 ///
 /// ```swift
-/// LiveNode {
-///     AnyKindView()
+/// LiveNode(node: node) {
+///     MyChartView()
 /// }
 /// ```
 ///
-/// Use the closure-with-context overload when the content needs to react
-/// to the node's activation state:
+/// For native views (`WKWebView`, `MKMapView`, `AVPlayerView`) the developer
+/// owns the underlying instance through `@State` and supplies a
+/// ``LiveNodeCapture/custom(_:)`` closure that produces a snapshot:
 ///
 /// ```swift
-/// LiveNode { live in
-///     MapNode(...)
-///         .allowsHitTesting(live.isActive)
+/// @State private var webView = WKWebView()
+///
+/// LiveNode(
+///     node: node,
+///     mount: .persistent,
+///     capture: .custom { await webView.makeFlowNodeSnapshot() }
+/// ) {
+///     WebRepresentable(webView: webView, url: url)
 /// }
 /// ```
-///
-/// By default, `LiveNode` assumes SwiftUI-only content:
-///
-/// ```swift
-/// .liveNodeMount(.onActivation)
-/// .liveNodeSnapshot(.automatic)
-/// ```
-///
-/// Native views such as `WKWebView`, `MKMapView`, and `AVPlayerView`
-/// should opt into native snapshot handling:
-///
-/// ```swift
-/// LiveNode {
-///     WebViewNode(url: url)
-/// }
-/// .liveNodeMount(.persistent)
-/// .liveNodeSnapshot(.native)
-/// ```
-///
-/// Native snapshot views can access `liveNodeNativeSnapshotContext` from
-/// the environment to:
-///
-/// - write ready-driven snapshots, e.g. after `WKNavigationDelegate.didFinish`
-/// - register a capture handler used when hover/activation ends
 public struct LiveNode<Content: View, Placeholder: View>: View {
 
     private let explicitNode: LiveNodeDescriptor?
+    private let configuration: LiveNodeConfiguration
     private let content: (LiveNodeContentContext) -> Content
     private let placeholder: () -> Placeholder
 
     @Environment(\.liveNodeEnvironment) private var liveNodeEnvironment
 
-    public init(
-        @ViewBuilder content: @escaping () -> Content,
-        @ViewBuilder placeholder: @escaping () -> Placeholder
-    ) {
-        self.explicitNode = nil
-        self.content = { _ in content() }
-        self.placeholder = placeholder
-    }
-
-    public init(
-        @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content,
-        @ViewBuilder placeholder: @escaping () -> Placeholder
-    ) {
-        self.explicitNode = nil
-        self.content = content
-        self.placeholder = placeholder
-    }
-
     public init<Data>(
         node: FlowNode<Data>,
+        mount: LiveNodeMountPolicy = .onActivation,
+        snapshot: LiveNodeSnapshotPolicy = .automatic,
+        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping () -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) where Data: Sendable & Hashable {
         self.explicitNode = LiveNodeDescriptor(node: node)
+        self.configuration = LiveNodeConfiguration(
+            mountPolicy: mount,
+            snapshotPolicy: snapshot,
+            capture: capture
+        )
         self.content = { _ in content() }
         self.placeholder = placeholder
     }
 
     public init<Data>(
         node: FlowNode<Data>,
+        mount: LiveNodeMountPolicy = .onActivation,
+        snapshot: LiveNodeSnapshotPolicy = .automatic,
+        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) where Data: Sendable & Hashable {
         self.explicitNode = LiveNodeDescriptor(node: node)
+        self.configuration = LiveNodeConfiguration(
+            mountPolicy: mount,
+            snapshotPolicy: snapshot,
+            capture: capture
+        )
         self.content = content
         self.placeholder = placeholder
     }
@@ -98,6 +79,7 @@ public struct LiveNode<Content: View, Placeholder: View>: View {
         if let resolved = resolvedEnvironment {
             LiveNodeCore(
                 environment: resolved,
+                configuration: configuration,
                 content: content,
                 placeholder: placeholder
             )
@@ -125,19 +107,18 @@ public struct LiveNode<Content: View, Placeholder: View>: View {
 }
 
 extension LiveNode where Placeholder == FlowDefaultPlaceholder {
-    public init(
+    public init<Data>(
+        node: FlowNode<Data>,
+        mount: LiveNodeMountPolicy = .onActivation,
+        snapshot: LiveNodeSnapshotPolicy = .automatic,
+        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping () -> Content
-    ) {
+    ) where Data: Sendable & Hashable {
         self.init(
-            content: content,
-            placeholder: { FlowDefaultPlaceholder() }
-        )
-    }
-
-    public init(
-        @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content
-    ) {
-        self.init(
+            node: node,
+            mount: mount,
+            snapshot: snapshot,
+            capture: capture,
             content: content,
             placeholder: { FlowDefaultPlaceholder() }
         )
@@ -145,21 +126,16 @@ extension LiveNode where Placeholder == FlowDefaultPlaceholder {
 
     public init<Data>(
         node: FlowNode<Data>,
-        @ViewBuilder content: @escaping () -> Content
-    ) where Data: Sendable & Hashable {
-        self.init(
-            node: node,
-            content: content,
-            placeholder: { FlowDefaultPlaceholder() }
-        )
-    }
-
-    public init<Data>(
-        node: FlowNode<Data>,
+        mount: LiveNodeMountPolicy = .onActivation,
+        snapshot: LiveNodeSnapshotPolicy = .automatic,
+        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content
     ) where Data: Sendable & Hashable {
         self.init(
             node: node,
+            mount: mount,
+            snapshot: snapshot,
+            capture: capture,
             content: content,
             placeholder: { FlowDefaultPlaceholder() }
         )
@@ -171,6 +147,7 @@ extension LiveNode where Placeholder == FlowDefaultPlaceholder {
 private struct LiveNodeCore<Content: View, Placeholder: View>: View {
 
     let environment: LiveNodeEnvironment
+    let configuration: LiveNodeConfiguration
     let content: (LiveNodeContentContext) -> Content
     let placeholder: () -> Placeholder
 
@@ -178,11 +155,8 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     @Environment(\.isFlowNodeActive) private var isActive
     @Environment(\.displayScale) private var displayScale
     @Environment(\.self) private var swiftUIEnvironment
-    @Environment(\.liveNodeConfiguration) private var configuration
     @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
     @Environment(\.liveNodeActivationCoordinator) private var coordinator
-
-    @StateObject private var nativeCaptureRegistry = LiveNodeNativeCaptureRegistry()
 
     @State private var remountGeneration: Int = 0
     @State private var previousActiveState: Bool = false
@@ -229,7 +203,6 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
                 remountGeneration: remountGeneration,
                 content: { content(contentContext) }
             )
-            .environment(\.liveNodeNativeSnapshotContext, makeNativeSnapshotContext())
             .modifier(
                 LiveNodeCaptureLifecycleModifier(
                     nodeID: environment.id,
@@ -258,7 +231,7 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
             remountGeneration += 1
         }
 
-        if configuration.snapshotPolicy.triggers.onActivation {
+        if configuration.snapshotPolicy.triggersOnActivation {
             Task { @MainActor in
                 await captureNow()
             }
@@ -268,23 +241,16 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     @MainActor
     private func seedSnapshotIfNeeded() {
         guard environment.snapshot == nil else { return }
-        guard configuration.snapshotPolicy.triggers.seedOnAppear else { return }
+        guard configuration.snapshotPolicy.seedsOnAppear else { return }
 
-        switch configuration.snapshotPolicy.source {
-        case .swiftUI:
-            Task { @MainActor in
-                await captureNow()
-            }
-
-        case .native, .disabled:
-            break
+        Task { @MainActor in
+            await captureNow()
         }
     }
 
     @MainActor
     private func registerDeactivationCapture() {
-        guard configuration.snapshotPolicy.triggers.onDeactivation else { return }
-        guard configuration.snapshotPolicy.source != .disabled else { return }
+        guard configuration.snapshotPolicy.triggersOnDeactivation else { return }
 
         coordinator?.registerCapture(for: environment.id) {
             await captureNow()
@@ -298,22 +264,24 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
 
     @MainActor
     private func captureNow() async {
-        switch configuration.snapshotPolicy.source {
-        case .swiftUI:
-            captureSwiftUIView()
+        guard let snapshotWriter else { return }
 
-        case .native:
-            await captureNativeView()
+        switch configuration.capture {
+        case .auto:
+            guard let snapshot = captureWithImageRenderer() else { return }
+            snapshotWriter(environment.id, snapshot)
+
+        case let .custom(handler):
+            guard let snapshot = await handler() else { return }
+            snapshotWriter(environment.id, snapshot)
 
         case .disabled:
-            break
+            return
         }
     }
 
     @MainActor
-    private func captureSwiftUIView() {
-        guard let snapshotWriter else { return }
-
+    private func captureWithImageRenderer() -> FlowNodeSnapshot? {
         let scale = captureScale
 
         let renderer = ImageRenderer(
@@ -322,87 +290,16 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
                 .frame(width: environment.size.width, height: environment.size.height)
                 .environment(\.self, swiftUIEnvironment)
         )
-
         renderer.scale = scale
 
         guard let cgImage = renderer.cgImage else {
-            return
+            return nil
         }
-
-        snapshotWriter(
-            environment.id,
-            FlowNodeSnapshot(
-                cgImage: cgImage,
-                scale: scale
-            )
-        )
-    }
-
-    @MainActor
-    private func captureNativeView() async {
-        guard let snapshotWriter else { return }
-        guard let handler = nativeCaptureRegistry.captureHandler else { return }
-        guard let snapshot = await handler() else { return }
-
-        snapshotWriter(environment.id, snapshot)
+        return FlowNodeSnapshot(cgImage: cgImage, scale: scale)
     }
 
     private var captureScale: CGFloat {
         min(max(displayScale * 2, 2), 4)
-    }
-
-    @MainActor
-    private func makeNativeSnapshotContext() -> LiveNodeNativeSnapshotContext {
-        LiveNodeNativeSnapshotContext(
-            nodeID: environment.id,
-            write: { snapshot in
-                // Ready-driven path. Only honored when the policy
-                // explicitly opts into ready-driven writes — high-
-                // frequency delegates can otherwise trigger a feedback
-                // loop through the store re-render.
-                guard configuration.snapshotPolicy.triggers.readyDriven else {
-                    return
-                }
-                snapshotWriter?(environment.id, snapshot)
-            },
-            registerCapture: { handler in
-                nativeCaptureRegistry.captureHandler = handler
-
-                guard configuration.snapshotPolicy.triggers.onDeactivation else {
-                    return
-                }
-
-                coordinator?.registerCapture(for: environment.id) {
-                    guard let snapshot = await handler() else {
-                        return
-                    }
-
-                    await MainActor.run {
-                        snapshotWriter?(environment.id, snapshot)
-                    }
-                }
-            },
-            unregisterCapture: {
-                // Only clear the native capture handler. Native views
-                // can dismantle for non-deactivation reasons (e.g. a
-                // `.id()`-driven remount, viewport churn), and tearing
-                // down `renderedActive` from here cascades into the
-                // coordinator and immediately deactivates the row that
-                // just remounted. The LiveNode's own
-                // `LiveNodeCaptureLifecycleModifier.onDisappear` is the
-                // single owner of activation-coordinator teardown.
-                nativeCaptureRegistry.captureHandler = nil
-            },
-            requestCapture: {
-                // Manual path. Only honored when the policy enables it,
-                // so a Representable wired up against an arbitrary policy
-                // cannot accidentally drive the write pipeline.
-                guard configuration.snapshotPolicy.triggers.manual else {
-                    return
-                }
-                await captureNativeView()
-            }
-        )
     }
 }
 
@@ -524,13 +421,16 @@ private struct LiveNodeCaptureLifecycleModifier: ViewModifier {
 
     private func runPeriodicCaptureLoopIfNeeded() async {
         guard isActive else { return }
-        guard let interval = snapshotPolicy.triggers.periodicInterval else { return }
-        guard snapshotPolicy.source != .disabled else { return }
+        guard let interval = snapshotPolicy.periodicInterval else { return }
 
         let nanos = UInt64(max(interval, 0.05) * 1_000_000_000)
 
         while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: nanos)
+            do {
+                try await Task.sleep(nanoseconds: nanos)
+            } catch {
+                return
+            }
 
             if Task.isCancelled {
                 return
@@ -539,13 +439,6 @@ private struct LiveNodeCaptureLifecycleModifier: ViewModifier {
             await captureNow()
         }
     }
-}
-
-// MARK: - Native Capture Registry
-
-@MainActor
-private final class LiveNodeNativeCaptureRegistry: ObservableObject {
-    var captureHandler: (@MainActor () async -> FlowNodeSnapshot?)?
 }
 
 // MARK: - Snapshot Writer Environment

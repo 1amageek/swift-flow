@@ -217,94 +217,111 @@ The default `Canvas` + `resolveSymbol` pipeline rasterizes each node every frame
 ```swift
 FlowCanvas(store: store) { node, ctx in
     let inset = FlowHandle.diameter / 2
-    LiveNode(node: node, context: ctx) {
+    LiveNode(node: node) {
         TimelineView(.animation) { tl in
             ClockFace(date: tl.date)
         }
     }
-    .frame(width: node.size.width, height: node.size.height)
     .padding(inset)
     .overlay { FlowNodeHandles(node: node, context: ctx) }
 }
 ```
 
-The library seeds a snapshot on first mount and re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path always has something to draw and colors / fonts stay consistent across the active ↔ inactive transition.
+The library seeds a snapshot on first mount and re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path always has something to draw and colors / fonts stay consistent across the active ↔ inactive transition. `LiveNode` sizes itself to `node.size`, so the caller does **not** need to apply a `.frame(...)` matching the node — just compose any handle padding, clipping, shadows, or overlays around it.
 
-`LiveNode` is a pure phase dispatcher — it applies no sizing, padding, clipping, or other styling. The caller composes all visual treatment (frame, corner radius, the handle-inset padding that keeps handles on the border from being clipped, background, overlays, etc.) with ordinary SwiftUI modifiers around `LiveNode`. Handle drawing is likewise the caller's responsibility: use `FlowNodeHandles(node:context:)` for the library default look, or compose `FlowHandle` views directly for fully custom handles.
+`LiveNode` is a phase dispatcher — its only sizing decision is matching `node.size`. Visual treatment (corner radius, the handle-inset padding that keeps handles on the border from being clipped, background, overlays, etc.) is composed with ordinary SwiftUI modifiers around `LiveNode`. Handle drawing is likewise the caller's responsibility: use `FlowNodeHandles(node:context:)` for the library default look, or compose `FlowHandle` views directly for fully custom handles.
 
 ### Native Views (WKWebView / MKMapView / AVPlayerView)
 
-Native views can't be rendered off-screen by `ImageRenderer`. Use `.manual(capture:)` and supply an async closure that writes a fresh snapshot using the framework-native APIs (`WKWebView.takeSnapshot`, `MKMapSnapshotter`, `AVPlayerItemVideoOutput.copyPixelBuffer`). The library awaits your handler on deactivation **before** the overlay fades — so the rasterize path always shows the newest frame with no stale-thumbnail flash:
+`ImageRenderer` cannot rasterize `UIViewRepresentable` / `NSViewRepresentable` content — `WKWebView`, `MKMapView`, `AVPlayerView`, and similar views render as opaque background. SwiftFlow does not bundle wrappers for individual native frameworks; instead, `LiveNode` exposes three init arguments that let the developer compose a working setup with framework-native snapshot APIs:
+
+| Argument | Type | Purpose |
+|---|---|---|
+| `mount:` | ``LiveNodeMountPolicy`` | When the live SwiftUI body is mounted in the overlay |
+| `snapshot:` | ``LiveNodeSnapshotPolicy`` | When `LiveNode` triggers a capture |
+| `capture:` | ``LiveNodeCapture`` | How a capture is produced — `.auto` uses `ImageRenderer`, `.custom { ... }` runs your async closure, `.disabled` skips capture |
+
+The recommended pattern is to own the native view in an `@StateObject` reference holder, then pass the same instance to both the `Representable` and the `capture: .custom` closure:
 
 ```swift
-FlowCanvas(store: store) { node, ctx in
-    let inset = FlowHandle.diameter / 2
-    let nodeID = node.id
-    LiveNode(
-        node: node,
-        context: ctx,
-        capture: .manual(capture: { await captureSnapshot(nodeID: nodeID) }),
-        mountPolicy: .persistent
-    ) {
-        WebViewRepresentable(url: node.data.url)
-    } placeholder: {
-        ProgressView()
-    }
-    .frame(width: node.size.width, height: node.size.height)
-    .padding(inset)
-    .overlay { FlowNodeHandles(node: node, context: ctx) }
-}
-```
-
-```swift
-// App-layer snapshot write
 @MainActor
-func captureSnapshot(nodeID: String) async {
-    guard let webView = webViewBag.webViews[nodeID] else { return }
-    let image = try? await webView.takeSnapshot(configuration: WKSnapshotConfiguration())
-    guard let cgImage = image?.cgImage else { return }
-    store.setNodeSnapshot(
-        FlowNodeSnapshot(cgImage: cgImage, scale: image!.scale),
-        for: nodeID
-    )
+private final class WebNodeRef: ObservableObject {
+    let webView = WKWebView()
+}
+
+private struct WebNode: View {
+    let node: FlowNode<MyData>
+    let url: URL
+    let store: FlowStore<MyData>
+
+    @StateObject private var ref = WebNodeRef()
+
+    var body: some View {
+        LiveNode(
+            node: node,
+            mount: .persistent,
+            snapshot: .onDeactivation,
+            capture: .custom { [ref] in
+                await ref.webView.makeFlowNodeSnapshot()
+            }
+        ) {
+            WebRepresentable(
+                webView: ref.webView,
+                url: url,
+                onSnapshotReady: { [store, nodeID = node.id] snapshot in
+                    store.setNodeSnapshot(snapshot, for: nodeID)
+                }
+            )
+        } placeholder: {
+            ProgressView()
+        }
+    }
 }
 ```
 
-### Capture Cadence
+`onSnapshotReady` is an app-layer callback the developer wires from a delegate (`WKNavigationDelegate.didFinish`, `MKMapViewDelegate.regionDidChangeAnimated`, `AVPlayerItem.didPlayToEndTimeNotification`, etc.). It pushes a fresh snapshot into `FlowStore` whenever the framework signals that new content is ready — independent of `LiveNode`'s own deactivation-triggered captures.
 
-| `LiveNodeCapture` | Behavior |
+Snapshot helpers are framework-specific. For `WKWebView`:
+
+```swift
+extension WKWebView {
+    @MainActor
+    func makeFlowNodeSnapshot() async -> FlowNodeSnapshot? {
+        let image = try? await takeSnapshot(configuration: WKSnapshotConfiguration())
+        guard let cgImage = image?.cgImage else { return nil }
+        return FlowNodeSnapshot(cgImage: cgImage, scale: image!.scale)
+    }
+}
+```
+
+`MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). See `Sources/SwiftFlow/Examples/LiveMapNode.swift` for a complete `MKMapView` reference implementation including activation kicks for the tile pipeline and per-node region persistence.
+
+### Snapshot Policy
+
+`LiveNode` separates **when** to capture (``LiveNodeSnapshotPolicy``) from **how** to capture (``LiveNodeCapture``).
+
+| `LiveNodeSnapshotPolicy` | Behavior |
 |---|---|
-| `.onDeactivation` *(default)* | Capture once on mount + once when deactivation starts |
-| `.periodic(TimeInterval)` | Capture at the given interval while active + once when deactivation starts |
-| `.manual(capture:)` | Library awaits your async closure on each deactivation — required for native views |
+| `.automatic` *(default)* | Seed once on first appear, re-capture on each deactivation |
+| `.onDeactivation` | Capture only on deactivation (no seed) — pair with `mount: .persistent` so the live view has time to render before the user deactivates |
+| `.disabled` | Never capture — the rasterize path falls back to the placeholder until the app pushes a snapshot via `FlowStore.setNodeSnapshot` |
+| `.periodic(TimeInterval)` | Capture at the given interval while active + once on deactivation |
 
-All modes route their final capture through the deactivation coordinator: the live overlay stays mounted at opacity 1 until the capture returns, so the first frame the user sees after deactivation is the **new** snapshot, not the previous one.
+Captures all route through the deactivation coordinator: the live overlay stays mounted at opacity 1 until the capture returns, so the first frame the user sees after deactivation is the **new** snapshot, not the previous one.
 
 ### Mount Policy
 
-`LiveNode` accepts a `mountPolicy:` argument that controls whether the overlay row hosting the live subtree is allowed to unmount while the node is inactive.
+`LiveNode` accepts a `mount:` argument that controls whether the overlay row hosting the live subtree is allowed to unmount while the node is inactive.
 
 | `LiveNodeMountPolicy` | Behavior |
 |---|---|
 | `.onActivation` *(default)* | The row mounts only while the activation predicate is true (or while the first snapshot is being warmed). Once the node deactivates, the live subtree leaves the view tree and the Canvas rasterize path takes over. Suitable for SwiftUI-only content — its state rebuilds from scratch on each remount and the captured snapshot fills the rasterize gap. |
+| `.remountOnActivation` | Same mount/unmount cadence as `.onActivation`, but each activation gives the live body a fresh SwiftUI identity so any `@State` resets. Use when the live content has stale internal state that needs to be reinitialized on each activation. |
 | `.persistent` | The row stays mounted continuously while the node is in viewport. The activation predicate only toggles `opacity` and hit-testing — the underlying view never detaches. **Required for native representables backed by a separate process** (`WKWebView`, `MKMapView`, `AVPlayerView`, `PDFView`). |
 
 Why native views need `.persistent`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the remote-layer subtree, which puts the WebContent / map tile / player processes into a dormant state. Reattachment does not reliably wake the `CARemoteLayerClient` / `CAMetalLayer` pipeline, so the surface stays blank from the second activation onward. With `.persistent` the native view stays mounted, its compositor never stalls, and URL / scroll / pan / zoom / playback state survives without any save/restore plumbing.
 
 The cost is that the WebContent / map / player process keeps running while the node is in viewport even when the user is not interacting with it — pick `.persistent` only for native nodes that need it, and leave SwiftUI-only `LiveNode`s on the default `.onActivation`.
-
-```swift
-LiveNode(
-    node: node,
-    context: ctx,
-    capture: .manual(capture: { await captureSnapshot(nodeID: nodeID) }),
-    mountPolicy: .persistent  // keep WKWebView's compositor alive across deactivations
-) {
-    WebViewRepresentable(url: node.data.url)
-} placeholder: {
-    ProgressView()
-}
-```
 
 The Poster pattern is unchanged by mount policy: while the node is inactive the Canvas always draws the stored `FlowNodeSnapshot` regardless of whether the live subtree is mounted underneath. `.persistent` only controls visibility, not whether the snapshot is shown.
 
@@ -346,7 +363,7 @@ Node drag is always driven by the Canvas's own gesture — multi-selection moves
 - **`LiveNode` with non-interactive content** (e.g. a `TimelineView` driving an animation). The content does not consume drags, but the active overlay row is still hit-testable so other gestures could route to it. Mark the live view as pass-through so drags reach the Canvas:
 
   ```swift
-  LiveNode(node: node, context: ctx) {
+  LiveNode(node: node) {
       TimelineView(.animation) { tl in
           ClockFace(date: tl.date)
       }
@@ -359,17 +376,16 @@ Node drag is always driven by the Canvas's own gesture — multi-selection moves
   ```swift
   FlowCanvas(store: store) { node, ctx in
       VStack(spacing: 0) {
-          FlowNodeDragHandle(node: node, context: ctx) {
+          FlowNodeDragHandle {
               Text(node.data.title)
                   .frame(maxWidth: .infinity, alignment: .leading)
                   .padding(6)
                   .background(.thinMaterial)
           }
-          LiveNode(node: node, context: ctx) {
+          LiveNode(node: node) {
               WebNodeRepresentable(url: node.data.url)
           }
       }
-      .frame(width: node.size.width, height: node.size.height)
       .padding(FlowHandle.diameter / 2)
       .overlay { FlowNodeHandles(node: node, context: ctx) }
   }

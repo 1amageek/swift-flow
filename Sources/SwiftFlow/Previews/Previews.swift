@@ -1524,9 +1524,11 @@ private struct LiveFlowPreview: View {
 /// Node body for the Live preview.
 ///
 /// `LiveNode(node:)` owns its own content-area frame at `node.size`, so
-/// this body only composes the surrounding chrome (header overlay,
-/// FlowHandle padding, handle overlay) — modifiers that should apply to
-/// both live and rasterize phases live outside `LiveNode`.
+/// this body only composes the surrounding chrome (FlowHandle padding,
+/// handle overlay). Modifiers that should apply to both live and
+/// rasterize phases — e.g. `clipShape`, `shadow`, `overlay(...)` — are
+/// attached directly to the `LiveNode` / `LiveMapNode` so they sit on
+/// the outer phase surface and affect both phases uniformly.
 private struct LivePreviewNodeBody: View {
 
     let node: FlowNode<LivePreviewData>
@@ -1535,22 +1537,57 @@ private struct LivePreviewNodeBody: View {
 
     var body: some View {
         let inset = FlowHandle.diameter / 2
+
+        nodeView
+            .padding(inset)
+            .overlay {
+                FlowNodeHandles(node: node, context: context)
+            }
+    }
+
+    @ViewBuilder
+    private var nodeView: some View {
         let cornerRadius: CGFloat = 12
 
-        Group {
-            switch node.data {
-            case .web, .map:
-                liveBody
-                    .overlay(alignment: .top) { headerOverlay }
-
-            case .resizable:
-                liveBody
+        switch node.data {
+        case let .web(url, title):
+            LiveNode(node: node) {
+                WebNodeRepresentable(
+                    url: url,
+                    cornerRadius: cornerRadius
+                )
+            } placeholder: {
+                placeholderBody(title: title)
             }
+            .liveNodeMount(.persistent)
+            .liveNodeSnapshot(.nativeReadyDriven)
+            .overlay(alignment: .top) {
+                headerOverlay
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+            .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+
+        case let .map(latitude, longitude, _):
+            LiveMapNode(
+                node: node,
+                initialCoordinate: CLLocationCoordinate2D(
+                    latitude: latitude,
+                    longitude: longitude
+                ),
+                stateStore: mapStateStore,
+                cornerRadius: cornerRadius
+            )
+            .overlay(alignment: .top) {
+                headerOverlay
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+            .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+
+        case let .resizable(_, color):
+            resizableBody(color: color)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
         }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
-        .padding(inset)
-        .overlay { FlowNodeHandles(node: node, context: context) }
     }
 
     private var headerOverlay: some View {
@@ -1568,36 +1605,6 @@ private struct LivePreviewNodeBody: View {
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)
             .background(node.data.headerColor.opacity(0.9))
-        }
-    }
-
-    @ViewBuilder
-    private var liveBody: some View {
-        let nativeCornerRadius: CGFloat = 12
-
-        switch node.data {
-        case let .web(url, title):
-            LiveNode(node: node) {
-                WebNodeRepresentable(
-                    url: url,
-                    cornerRadius: nativeCornerRadius
-                )
-            } placeholder: {
-                placeholderBody(title: title)
-            }
-            .liveNodeMount(.persistent)
-            .liveNodeSnapshot(.nativeReadyDriven)
-
-        case let .map(latitude, longitude, _):
-            LiveMapNode(
-                node: node,
-                initialCoordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
-                stateStore: mapStateStore,
-                cornerRadius: nativeCornerRadius
-            )
-
-        case let .resizable(_, color):
-            resizableBody(color: color)
         }
     }
 

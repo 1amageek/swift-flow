@@ -159,11 +159,11 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
     let stateStore: LiveMapNodeStateStore
 
     /// Closure injected by ``LiveMapRepresentable`` from
-    /// `\.flowLiveNodeSnapshotWriter` so the coordinator can push the
-    /// initial snapshot once tile rendering has stabilized. `LiveNode` is
-    /// configured with `snapshot: .disabled` and `capture: .disabled`, so
-    /// it never seeds on its own — without this manual push the row
-    /// would stay in warmup mode forever.
+    /// `\.flowLiveNodeSnapshotWriter` so the coordinator can push a
+    /// bootstrap snapshot 500ms after the activation kick. `LiveNode` is
+    /// configured with `snapshot: .onDeactivation` (no `seedOnAppear`),
+    /// so without this push the poster stays empty until the user has
+    /// hovered out at least once.
     var snapshotWriter: (@MainActor (String, FlowNodeSnapshot) -> Void)?
 
     /// Only flipped to `true` after a real-size `setRegion` has actually

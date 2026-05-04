@@ -241,37 +241,25 @@ The library seeds a snapshot on first mount and re-captures on deactivation usin
 | `snapshot:` | ``LiveNodeSnapshotPolicy`` | When `LiveNode` triggers a capture |
 | `capture:` | ``LiveNodeCapture`` | How a capture is produced — `.auto` uses `ImageRenderer`, `.custom { ... }` runs your async closure, `.disabled` skips capture |
 
-The recommended pattern is to own the native view in an `@StateObject` reference holder, then pass the same instance to both the `Representable` and the `capture: .custom` closure:
+The recommended pattern is to own the native view in `@State` and pass the same instance to both the `Representable` and the `capture: .custom` closure. For `.persistent` mount, the instance is stable across activation toggles, so a plain `@State` reference works without any wrapper holder:
 
 ```swift
-@MainActor
-private final class WebNodeRef: ObservableObject {
-    let webView = WKWebView()
-}
-
 private struct WebNode: View {
     let node: FlowNode<MyData>
     let url: URL
-    let store: FlowStore<MyData>
 
-    @StateObject private var ref = WebNodeRef()
+    @State private var webView = WKWebView()
 
     var body: some View {
         LiveNode(
             node: node,
             mount: .persistent,
             snapshot: .onDeactivation,
-            capture: .custom { [ref] in
-                await ref.webView.makeFlowNodeSnapshot()
+            capture: .custom {
+                await webView.makeFlowNodeSnapshot()
             }
         ) {
-            WebRepresentable(
-                webView: ref.webView,
-                url: url,
-                onSnapshotReady: { [store, nodeID = node.id] snapshot in
-                    store.setNodeSnapshot(snapshot, for: nodeID)
-                }
-            )
+            WebRepresentable(webView: webView, url: url)
         } placeholder: {
             ProgressView()
         }
@@ -279,7 +267,7 @@ private struct WebNode: View {
 }
 ```
 
-`onSnapshotReady` is an app-layer callback the developer wires from a delegate (`WKNavigationDelegate.didFinish`, `MKMapViewDelegate.regionDidChangeAnimated`, `AVPlayerItem.didPlayToEndTimeNotification`, etc.). It pushes a fresh snapshot into `FlowStore` whenever the framework signals that new content is ready — independent of `LiveNode`'s own deactivation-triggered captures.
+If the app needs to push a fresh snapshot at moments other than deactivation — e.g. on `WKNavigationDelegate.didFinish`, `MKMapViewDelegate.regionDidChangeAnimated`, or `AVPlayerItem.didPlayToEndTimeNotification` — call `store.setNodeSnapshot(_, for: nodeID)` directly from the delegate. That path is independent of `LiveNode`'s deactivation-triggered captures.
 
 Snapshot helpers are framework-specific. For `WKWebView`:
 

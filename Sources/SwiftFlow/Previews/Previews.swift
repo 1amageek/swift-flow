@@ -1141,27 +1141,32 @@ private enum ResizeCorner {
     func apply(startFrame: CGRect, canvasDelta: CGSize, minSize: CGSize) -> CGRect {
         var x = startFrame.minX
         var y = startFrame.minY
-        var w = startFrame.width
-        var h = startFrame.height
+        var width = startFrame.width
+        var height = startFrame.height
+
         switch self {
         case .topLeft:
             x = min(startFrame.minX + canvasDelta.width, startFrame.maxX - minSize.width)
             y = min(startFrame.minY + canvasDelta.height, startFrame.maxY - minSize.height)
-            w = max(minSize.width, startFrame.width - canvasDelta.width)
-            h = max(minSize.height, startFrame.height - canvasDelta.height)
+            width = max(minSize.width, startFrame.width - canvasDelta.width)
+            height = max(minSize.height, startFrame.height - canvasDelta.height)
+
         case .topRight:
             y = min(startFrame.minY + canvasDelta.height, startFrame.maxY - minSize.height)
-            w = max(minSize.width, startFrame.width + canvasDelta.width)
-            h = max(minSize.height, startFrame.height - canvasDelta.height)
+            width = max(minSize.width, startFrame.width + canvasDelta.width)
+            height = max(minSize.height, startFrame.height - canvasDelta.height)
+
         case .bottomLeft:
             x = min(startFrame.minX + canvasDelta.width, startFrame.maxX - minSize.width)
-            w = max(minSize.width, startFrame.width - canvasDelta.width)
-            h = max(minSize.height, startFrame.height + canvasDelta.height)
+            width = max(minSize.width, startFrame.width - canvasDelta.width)
+            height = max(minSize.height, startFrame.height + canvasDelta.height)
+
         case .bottomRight:
-            w = max(minSize.width, startFrame.width + canvasDelta.width)
-            h = max(minSize.height, startFrame.height + canvasDelta.height)
+            width = max(minSize.width, startFrame.width + canvasDelta.width)
+            height = max(minSize.height, startFrame.height + canvasDelta.height)
         }
-        return CGRect(x: x, y: y, width: w, height: h)
+
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 }
 
@@ -1210,96 +1215,100 @@ private struct ResizeHandleOverlay<Data: Sendable & Hashable>: View {
                 DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { value in
                         guard let node = store.nodeLookup[nodeID] else { return }
+
                         if startFrame == nil {
                             startFrame = node.frame
                             store.beginInteractiveUpdates()
                         }
-                        guard let start = startFrame else { return }
+
+                        guard let startFrame else { return }
+
                         let zoom = store.viewport.zoom
                         let canvasDelta = CGSize(
                             width: value.translation.width / zoom,
                             height: value.translation.height / zoom
                         )
+
                         let newFrame = corner.apply(
-                            startFrame: start,
+                            startFrame: startFrame,
                             canvasDelta: canvasDelta,
                             minSize: minSize
                         )
-                        store.updateNode(nodeID) { n in
-                            n.position = newFrame.origin
-                            n.size = newFrame.size
+
+                        store.updateNode(nodeID) { node in
+                            node.position = newFrame.origin
+                            node.size = newFrame.size
                         }
                     }
                     .onEnded { _ in
-                        guard let start = startFrame else { return }
-                        startFrame = nil
+                        guard let startFrame else { return }
+                        self.startFrame = nil
                         store.endInteractiveUpdates()
-                        store.completeResizeNodes(from: [nodeID: start])
+                        store.completeResizeNodes(from: [nodeID: startFrame])
                     }
             )
     }
 }
 
-// MARK: - Web support
+// MARK: - Platform image helpers
 
-/// Holds the WKWebView instances that back the live overlay nodes so the
-/// preview can call `takeSnapshot` on them independently of SwiftUI's
-/// view lifecycle. Once a node's overlay appears, its WKWebView lands in
-/// here and survives subsequent activation toggles.
-@MainActor
-@Observable
-private final class WebViewBag {
-    var webViews: [String: WKWebView] = [:]
+#if os(iOS)
+private typealias LivePreviewPlatformImage = UIImage
+#elseif os(macOS)
+private typealias LivePreviewPlatformImage = NSImage
+#endif
+
+private extension LivePreviewPlatformImage {
+    var flowNodeSnapshot: FlowNodeSnapshot? {
+        #if os(iOS)
+        guard let cgImage else { return nil }
+        return FlowNodeSnapshot(cgImage: cgImage, scale: scale)
+        #elseif os(macOS)
+        var rect = CGRect(origin: .zero, size: size)
+        guard let cgImage = cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
+            return nil
+        }
+        let scale = CGFloat(cgImage.width) / max(size.width, 1)
+        return FlowNodeSnapshot(cgImage: cgImage, scale: scale)
+        #endif
+    }
 }
 
-/// Bridges `WKNavigationDelegate` into a SwiftUI-friendly callback so
-/// the live node can refresh its snapshot whenever the page finishes
-/// loading — including in-WebView navigations where the user clicks a
-/// link. A short settle delay after `didFinish` lets the final paint
-/// land before `takeSnapshot` reads the surface.
+// MARK: - Web support
+
 @MainActor
 private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
-    var onLoadFinished: (@MainActor () -> Void)?
+    var snapshotContext: LiveNodeNativeSnapshotContext?
+
+    private var registeredWebViewID: ObjectIdentifier?
+
+    func registerCaptureIfNeeded(for webView: WKWebView) {
+        let id = ObjectIdentifier(webView)
+        guard registeredWebViewID != id else { return }
+        registeredWebViewID = id
+
+        snapshotContext?.registerCapture { [weak webView] in
+            await webView?.makeFlowNodeSnapshot()
+        }
+    }
+
+    func unregisterCapture() {
+        registeredWebViewID = nil
+        snapshotContext?.unregisterCapture()
+    }
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
-            self?.onLoadFinished?()
+            guard let snapshot = await webView.makeFlowNodeSnapshot() else { return }
+            self?.snapshotContext?.write(snapshot)
         }
     }
 }
 
-/// WKWebView subclass that wakes its own WebContent compositor when it
-/// reattaches to a window.
-///
-/// `LiveNode`'s mount policy unmounts a row on deactivation and remounts
-/// it on reactivation. For pure SwiftUI content that is fine, but native
-/// views backed by a separate process (WKWebView, MKMapView, AVPlayer)
-/// enter a dormant state while detached — the view's layer is valid but
-/// no new frame has been pushed, so the surface draws as solid black
-/// until something triggers a new paint.
-///
-/// `didMoveToWindow` is the authoritative signal for reattachment on
-/// both platforms. Touching a layout-sensitive DOM property from JS
-/// forces the WebContent process to reflow and paint, which publishes a
-/// fresh IOSurface on the next compositor tick. Belongs here (in the
-/// view subclass) rather than in the library — the mismatch is between
-/// WKWebView's own lifecycle assumptions and SwiftUI's mount/unmount
-/// semantics, and WKWebView is the thing that knows it just reattached.
 private final class LiveWebView: WKWebView {
-
-    /// Disable WebKit's window-occlusion driven render throttling.
-    ///
-    /// Xcode's SwiftUI Preview hosts the canvas in an NSWindow that does
-    /// **not** have `NSWindowOcclusionState.visible` set — even while the
-    /// preview canvas is fully on screen. WebKit reads that flag to
-    /// pause WebContent rendering when it thinks the window is hidden,
-    /// so within ~1s of load the WebContent process stops publishing
-    /// IOSurfaces and the layer goes black.
-    ///
-    /// `_setWindowOcclusionDetectionEnabled:` is the SPI that turns
-    /// off that pause. SPI is acceptable here because this entire file
-    /// is `#if DEBUG`-gated and never ships to the App Store.
+    /// DEBUG-only workaround for SwiftUI Preview windows whose occlusion state
+    /// can make WebKit pause WebContent rendering even while visible.
     func disableWindowOcclusionDetection() {
         let selector = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
         if responds(to: selector) {
@@ -1326,272 +1335,104 @@ private final class LiveWebView: WKWebView {
     }
 }
 
+private extension WKWebView {
+    @MainActor
+    func makeFlowNodeSnapshot() async -> FlowNodeSnapshot? {
+        let configuration = WKSnapshotConfiguration()
+
+        do {
+            let image = try await takeSnapshot(configuration: configuration)
+            return image.flowNodeSnapshot
+        } catch {
+            return nil
+        }
+    }
+}
+
 #if os(iOS)
 private struct WebNodeRepresentable: UIViewRepresentable {
-    let nodeID: String
+    @Environment(\.liveNodeNativeSnapshotContext) private var snapshotContext
+
     let url: URL
     let cornerRadius: CGFloat
-    let bag: WebViewBag
-    let onLoadFinished: @MainActor () -> Void
 
-    func makeCoordinator() -> WebNodeCoordinator { WebNodeCoordinator() }
-
-    func makeUIView(context: Context) -> WKWebView {
-        context.coordinator.onLoadFinished = onLoadFinished
-        let wv: WKWebView
-        if let existing = bag.webViews[nodeID] {
-            existing.removeFromSuperview()
-            wv = existing
-        } else {
-            wv = LiveWebView()
-            wv.load(URLRequest(url: url))
-            bag.webViews[nodeID] = wv
-        }
-        wv.navigationDelegate = context.coordinator
-        wv.layer.cornerRadius = cornerRadius
-        wv.layer.masksToBounds = true
-        wv.scrollView.layer.cornerRadius = cornerRadius
-        wv.scrollView.layer.masksToBounds = true
-        return wv
+    func makeCoordinator() -> WebNodeCoordinator {
+        WebNodeCoordinator()
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {
-        context.coordinator.onLoadFinished = onLoadFinished
-        uiView.layer.cornerRadius = cornerRadius
-        uiView.scrollView.layer.cornerRadius = cornerRadius
+    func makeUIView(context: Context) -> WKWebView {
+        context.coordinator.snapshotContext = snapshotContext
+
+        let webView = LiveWebView()
+        webView.navigationDelegate = context.coordinator
+        webView.layer.cornerRadius = cornerRadius
+        webView.layer.masksToBounds = true
+        webView.scrollView.layer.cornerRadius = cornerRadius
+        webView.scrollView.layer.masksToBounds = true
+        webView.load(URLRequest(url: url))
+
+        context.coordinator.registerCaptureIfNeeded(for: webView)
+
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.snapshotContext = snapshotContext
+        webView.layer.cornerRadius = cornerRadius
+        webView.scrollView.layer.cornerRadius = cornerRadius
+        context.coordinator.registerCaptureIfNeeded(for: webView)
+    }
+
+    static func dismantleUIView(_ webView: WKWebView, coordinator: WebNodeCoordinator) {
+        coordinator.unregisterCapture()
+        webView.navigationDelegate = nil
     }
 }
 #elseif os(macOS)
 private struct WebNodeRepresentable: NSViewRepresentable {
-    let nodeID: String
+    @Environment(\.liveNodeNativeSnapshotContext) private var snapshotContext
+
     let url: URL
     let cornerRadius: CGFloat
-    let bag: WebViewBag
-    let onLoadFinished: @MainActor () -> Void
 
-    func makeCoordinator() -> WebNodeCoordinator { WebNodeCoordinator() }
+    func makeCoordinator() -> WebNodeCoordinator {
+        WebNodeCoordinator()
+    }
 
     func makeNSView(context: Context) -> WKWebView {
-        context.coordinator.onLoadFinished = onLoadFinished
-        let wv: WKWebView
-        if let existing = bag.webViews[nodeID] {
-            existing.removeFromSuperview()
-            wv = existing
-        } else {
-            let lwv = LiveWebView()
-            lwv.disableWindowOcclusionDetection()
-            lwv.load(URLRequest(url: url))
-            bag.webViews[nodeID] = lwv
-            wv = lwv
-        }
-        wv.navigationDelegate = context.coordinator
-        wv.wantsLayer = true
-        wv.layer?.cornerRadius = cornerRadius
-        wv.layer?.masksToBounds = true
-        return wv
+        context.coordinator.snapshotContext = snapshotContext
+
+        let webView = LiveWebView()
+        webView.disableWindowOcclusionDetection()
+        webView.navigationDelegate = context.coordinator
+        webView.wantsLayer = true
+        webView.layer?.cornerRadius = cornerRadius
+        webView.layer?.masksToBounds = true
+        webView.load(URLRequest(url: url))
+
+        context.coordinator.registerCaptureIfNeeded(for: webView)
+
+        return webView
     }
 
-    func updateNSView(_ nsView: WKWebView, context: Context) {
-        context.coordinator.onLoadFinished = onLoadFinished
-        nsView.layer?.cornerRadius = cornerRadius
-    }
-}
-#endif
-
-// MARK: - Map support
-
-/// Tracks the currently-mounted MKMapView per node (so snapshot capture
-/// can read its region) and persists the last-seen `MKCoordinateRegion`
-/// across mount cycles (so pan / zoom state survives activation toggles
-/// without having to reuse the MKMapView instance itself).
-///
-/// Reusing MKMapView across mount cycles — i.e. caching the instance,
-/// detaching it via `dismantleNSView`, and reattaching it via a later
-/// `makeNSView` — stalls the CAMetalLayer tile pipeline. The symptom is
-/// that the MKMapView chrome (Apple Maps attribution label) renders but
-/// the map tiles stay blank. Storing only the `region` (a value type)
-/// avoids that while preserving the user-visible state.
-@MainActor
-@Observable
-private final class MapViewBag {
-    /// The MKMapView currently mounted for a node. Populated in
-    /// `makeNSView/makeUIView`, cleared in `dismantleNSView/dismantleUIView`.
-    var mapViews: [String: MKMapView] = [:]
-    /// Last-seen region per node. Persists across mount cycles so pan /
-    /// zoom state isn't lost when a node deactivates.
-    var regions: [String: MKCoordinateRegion] = [:]
-}
-
-#if os(iOS)
-private struct MapNodeRepresentable: UIViewRepresentable {
-    let nodeID: String
-    let initialCoordinate: CLLocationCoordinate2D
-    let cornerRadius: CGFloat
-    let bag: MapViewBag
-
-    func makeUIView(context: Context) -> MKMapView {
-        let mv = MKMapView()
-        let region = bag.regions[nodeID] ?? MKCoordinateRegion(
-            center: initialCoordinate,
-            latitudinalMeters: 3000,
-            longitudinalMeters: 3000
-        )
-        mv.setRegion(region, animated: false)
-        mv.layer.cornerRadius = cornerRadius
-        mv.layer.masksToBounds = true
-        bag.mapViews[nodeID] = mv
-        return mv
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.snapshotContext = snapshotContext
+        webView.layer?.cornerRadius = cornerRadius
+        context.coordinator.registerCaptureIfNeeded(for: webView)
     }
 
-    func updateUIView(_ mv: MKMapView, context: Context) {
-        if mv.layer.cornerRadius != cornerRadius {
-            mv.layer.cornerRadius = cornerRadius
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(nodeID: nodeID, bag: bag)
-    }
-
-    @MainActor
-    final class Coordinator {
-        let nodeID: String
-        let bag: MapViewBag
-
-        init(nodeID: String, bag: MapViewBag) {
-            self.nodeID = nodeID
-            self.bag = bag
-        }
-    }
-
-    static func dismantleUIView(_ mv: MKMapView, coordinator: Coordinator) {
-        MainActor.assumeIsolated {
-            coordinator.bag.regions[coordinator.nodeID] = mv.region
-            if coordinator.bag.mapViews[coordinator.nodeID] === mv {
-                coordinator.bag.mapViews.removeValue(forKey: coordinator.nodeID)
-            }
-        }
-    }
-}
-#elseif os(macOS)
-private struct MapNodeRepresentable: NSViewRepresentable {
-    let nodeID: String
-    let initialCoordinate: CLLocationCoordinate2D
-    let cornerRadius: CGFloat
-    let bag: MapViewBag
-
-    func makeNSView(context: Context) -> MKMapView {
-        let mv = MKMapView()
-        let region = bag.regions[nodeID] ?? MKCoordinateRegion(
-            center: initialCoordinate,
-            latitudinalMeters: 3000,
-            longitudinalMeters: 3000
-        )
-        mv.setRegion(region, animated: false)
-        mv.wantsLayer = true
-        mv.layer?.cornerRadius = cornerRadius
-        mv.layer?.masksToBounds = true
-        bag.mapViews[nodeID] = mv
-        return mv
-    }
-
-    func updateNSView(_ mv: MKMapView, context: Context) {
-        if mv.layer?.cornerRadius != cornerRadius {
-            mv.layer?.cornerRadius = cornerRadius
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(nodeID: nodeID, bag: bag)
-    }
-
-    @MainActor
-    final class Coordinator {
-        let nodeID: String
-        let bag: MapViewBag
-
-        init(nodeID: String, bag: MapViewBag) {
-            self.nodeID = nodeID
-            self.bag = bag
-        }
-    }
-
-    static func dismantleNSView(_ mv: MKMapView, coordinator: Coordinator) {
-        MainActor.assumeIsolated {
-            coordinator.bag.regions[coordinator.nodeID] = mv.region
-            if coordinator.bag.mapViews[coordinator.nodeID] === mv {
-                coordinator.bag.mapViews.removeValue(forKey: coordinator.nodeID)
-            }
-        }
+    static func dismantleNSView(_ webView: WKWebView, coordinator: WebNodeCoordinator) {
+        coordinator.unregisterCapture()
+        webView.navigationDelegate = nil
     }
 }
 #endif
-
-/// Only mounts `MapNodeRepresentable` while the node is rendered active.
-///
-/// The overlay applies `opacity(0)` to inactive nodes. Gating the mount
-/// on `isActive` keeps `MKMapView` out of the view tree during those
-/// phases so the ancestor opacity never reaches its `CAMetalLayer`,
-/// which avoids a plausible Metal-pipeline pause on the opacity edge.
-/// The observed failure that actually drove this design was different:
-/// caching an `MKMapView` across mount cycles — detaching it via
-/// `dismantleNSView` and reattaching a later `makeNSView` — stalls the
-/// Metal tile pipeline. The symptom is the MKMapView UI chrome (Apple
-/// Maps attribution label) renders but the map tiles stay blank.
-/// `MapNodeRepresentable` therefore builds a fresh `MKMapView` on every
-/// mount and persists only the `MKCoordinateRegion` in `MapViewBag`, so
-/// pan / zoom state is restored without reusing the instance.
-private struct MapNodeLive: View {
-    let nodeID: String
-    let initialCoordinate: CLLocationCoordinate2D
-    let cornerRadius: CGFloat
-    let bag: MapViewBag
-    let seedSnapshot: () async -> Void
-
-    @Environment(\.isFlowNodeActive) private var isActive
-
-    var body: some View {
-        Group {
-            if isActive {
-                MapNodeRepresentable(
-                    nodeID: nodeID,
-                    initialCoordinate: initialCoordinate,
-                    cornerRadius: cornerRadius,
-                    bag: bag
-                )
-            } else {
-                Color.clear
-            }
-        }
-        .task(id: nodeID) {
-            await seedSnapshot()
-        }
-    }
-}
-
-/// Applies a drop shadow only on the rasterize pass. SwiftUI `.shadow`
-/// forces an offscreen compositing group that `CAMetalLayer` drawables
-/// don't participate in, so the live MKMapView keeps only its `CALayer`
-/// cornerRadius and forgoes the shadow.
-private struct PhaseGatedShadow: ViewModifier {
-    @Environment(\.flowNodeRenderPhase) private var phase
-
-    func body(content: Content) -> some View {
-        switch phase {
-        case .rasterize:
-            content.shadow(color: .black.opacity(0.15), radius: 6, y: 2)
-        case .live:
-            content
-        }
-    }
-}
 
 // MARK: - Live preview view
 
 private struct LiveFlowPreview: View {
 
-    @State private var webViewBag = WebViewBag()
-    @State private var mapViewBag = MapViewBag()
+    @State private var mapStateStore = LiveMapNodeStateStore()
     @State private var store: FlowStore<LivePreviewData> = {
         FlowStore<LivePreviewData>(
             nodes: [
@@ -1637,27 +1478,27 @@ private struct LiveFlowPreview: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            FlowCanvas(store: store) { node, ctx in
-                nodeBody(for: node, ctx: ctx)
+            FlowCanvas(store: store) { node, context in
+                nodeBody(for: node, context: context)
             }
             .liveNodeActivation { node, store in
-                store.selectedNodeIDs.contains(node.id)
-                    || store.hoveredNodeID == node.id
+                store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
             }
             .overlay {
-                ForEach(Array(store.selectedNodeIDs), id: \.self) { id in
-                    if case .resizable = store.nodeLookup[id]?.data {
-                        ResizeHandleOverlay(store: store, nodeID: id)
+                ForEach(Array(store.selectedNodeIDs), id: \.self) { nodeID in
+                    if case .resizable = store.nodeLookup[nodeID]?.data {
+                        ResizeHandleOverlay(store: store, nodeID: nodeID)
                     }
                 }
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Live Node Preview").font(.headline)
+                Text("Live Node Preview")
+                    .font(.headline)
                 Text("Hover or select a node to switch from snapshot to its live view.")
                 Text("Web / map headers use FlowNodeDragHandle so node-move works above scroll-consuming bodies.")
                     .foregroundStyle(.secondary)
-                Text("The orange node runs a TimelineView and moves like any plain node (no handle needed).")
+                Text("Web nodes use .persistent + .nativeReadyDriven; map nodes use .remountOnActivation + .nativeManual.")
                     .foregroundStyle(.secondary)
                 Text("Select the orange node and drag a corner handle to resize.")
                     .foregroundStyle(.secondary)
@@ -1670,95 +1511,93 @@ private struct LiveFlowPreview: View {
     }
 
     @ViewBuilder
-    private func nodeBody(for node: FlowNode<LivePreviewData>, ctx: NodeRenderContext) -> some View {
+    private func nodeBody(for node: FlowNode<LivePreviewData>, context: NodeRenderContext) -> some View {
+        LivePreviewNodeBody(
+            node: node,
+            context: context,
+            mapStateStore: mapStateStore
+        )
+    }
+
+}
+
+/// Node body for the Live preview.
+///
+/// `LiveNode(node:)` owns its own content-area frame at `node.size`, so
+/// this body only composes the surrounding chrome (header overlay,
+/// FlowHandle padding, handle overlay) — modifiers that should apply to
+/// both live and rasterize phases live outside `LiveNode`.
+private struct LivePreviewNodeBody: View {
+
+    let node: FlowNode<LivePreviewData>
+    let context: NodeRenderContext
+    let mapStateStore: LiveMapNodeStateStore
+
+    var body: some View {
         let inset = FlowHandle.diameter / 2
         let cornerRadius: CGFloat = 12
 
         Group {
             switch node.data {
             case .web, .map:
-                // The body is a scroll-consuming representable
-                // (WKWebView / MKMapView) that swallows drags while
-                // active. A `FlowNodeDragHandle` header carves a
-                // pass-through strip whose drags fall to Canvas so
-                // node-move still works.
-                VStack(spacing: 0) {
-                    FlowNodeDragHandle(node: node, context: ctx) {
-                        HStack(spacing: 6) {
-                            Image(systemName: node.data.headerSymbol)
-                                .font(.caption)
-                            Text(node.data.title)
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity)
-                        .background(node.data.headerColor.opacity(0.9))
-                    }
-
-                    liveBody(for: node, ctx: ctx, cornerRadius: cornerRadius)
-                }
+                liveBody
+                    .overlay(alignment: .top) { headerOverlay }
 
             case .resizable:
-                // Plain (non-live) node — Canvas-level drag already
-                // covers the whole surface, so no handle is needed.
-                liveBody(for: node, ctx: ctx, cornerRadius: cornerRadius)
+                liveBody
             }
         }
-        .frame(width: node.size.width, height: node.size.height)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .modifier(PhaseGatedShadow())
+        .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
         .padding(inset)
-        .overlay { FlowNodeHandles(node: node, context: ctx) }
+        .overlay { FlowNodeHandles(node: node, context: context) }
+    }
+
+    private var headerOverlay: some View {
+        FlowNodeDragHandle {
+            HStack(spacing: 6) {
+                Image(systemName: node.data.headerSymbol)
+                    .font(.caption)
+                Text(node.data.title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(node.data.headerColor.opacity(0.9))
+        }
     }
 
     @ViewBuilder
-    private func liveBody(for node: FlowNode<LivePreviewData>, ctx: NodeRenderContext, cornerRadius: CGFloat) -> some View {
+    private var liveBody: some View {
+        let nativeCornerRadius: CGFloat = 12
+
         switch node.data {
         case let .web(url, title):
-            let nodeID = node.id
-            LiveNode(
-                node: node,
-                context: ctx,
-                capture: .manual(capture: { await captureWebSnapshot(nodeID: nodeID) }),
-                mountPolicy: .persistent
-            ) {
+            LiveNode(node: node) {
                 WebNodeRepresentable(
-                    nodeID: nodeID,
                     url: url,
-                    cornerRadius: 0,
-                    bag: webViewBag,
-                    onLoadFinished: {
-                        Task { await captureWebSnapshot(nodeID: nodeID) }
-                    }
+                    cornerRadius: nativeCornerRadius
                 )
             } placeholder: {
                 placeholderBody(title: title)
             }
+            .liveNodeMount(.persistent)
+            .liveNodeSnapshot(.nativeReadyDriven)
 
-        case let .map(latitude, longitude, title):
-            LiveNode(
+        case let .map(latitude, longitude, _):
+            LiveMapNode(
                 node: node,
-                context: ctx,
-                capture: .manual(capture: { await captureMapSnapshot(for: node) }),
-                mountPolicy: .persistent
-            ) {
-                MapNodeLive(
-                    nodeID: node.id,
-                    initialCoordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
-                    cornerRadius: 0,
-                    bag: mapViewBag,
-                    seedSnapshot: { await captureMapSnapshot(for: node) }
-                )
-            } placeholder: {
-                placeholderBody(title: title)
-            }
+                initialCoordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                stateStore: mapStateStore,
+                cornerRadius: nativeCornerRadius
+            )
 
         case let .resizable(_, color):
-            resizableBody(node: node, ctx: ctx, color: color)
+            resizableBody(color: color)
         }
     }
 
@@ -1770,28 +1609,20 @@ private struct LiveFlowPreview: View {
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.secondary.opacity(0.08))
+        .background(.background)
     }
 
-    private func resizableBody(
-        node: FlowNode<LivePreviewData>,
-        ctx: NodeRenderContext,
-        color colorName: String
-    ) -> some View {
-        let color: Color = {
-            switch colorName {
-            case "blue":   return .blue
-            case "orange": return .orange
-            case "green":  return .green
-            default:       return .gray
-            }
-        }()
+    private func resizableBody(color colorName: String) -> some View {
+        let color = resizableColor(named: colorName)
         let size = node.size
-        return LiveNode(node: node, context: ctx) {
-            TimelineView(.animation) { tl in
-                let t = tl.date.timeIntervalSinceReferenceDate
+
+        return LiveNode(node: node) {
+            TimelineView(.animation) { timeline in
+                let time = timeline.date.timeIntervalSinceReferenceDate
+
                 ZStack {
-                    color.opacity(0.12 + 0.08 * (0.5 + 0.5 * sin(t * 2)))
+                    color.opacity(0.12 + 0.08 * (0.5 + 0.5 * sin(time * 2)))
+
                     VStack(spacing: 4) {
                         Text("\(Int(size.width)) × \(Int(size.height))")
                             .font(.caption.monospaced())
@@ -1800,93 +1631,26 @@ private struct LiveFlowPreview: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+
                     Circle()
                         .trim(from: 0, to: 0.25)
                         .stroke(color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                        .rotationEffect(.degrees(t * 180))
+                        .rotationEffect(.degrees(time * 180))
                         .frame(width: 22, height: 22)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(8)
                 }
             }
         }
-        // The TimelineView body is purely visual — no gestures to consume.
-        // Disable hit testing so overlay drags fall through to the Canvas
-        // and the node moves like any plain (non-live) node. Consistent
-        // with the rule: a `FlowNodeDragHandle` is only needed when the
-        // live content itself swallows drags (WKWebView / MKMapView).
         .allowsHitTesting(false)
     }
 
-    @MainActor
-    private func captureWebSnapshot(nodeID: String) async {
-        guard let webView = webViewBag.webViews[nodeID] else {
-            return
-        }
-        let config = WKSnapshotConfiguration()
-        do {
-            let image = try await webView.takeSnapshot(configuration: config)
-            #if os(iOS)
-            guard let cgImage = image.cgImage else { return }
-            let scale = image.scale
-            #elseif os(macOS)
-            var rect = CGRect(origin: .zero, size: image.size)
-            guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else {
-                return
-            }
-            let scale = CGFloat(cgImage.width) / max(image.size.width, 1)
-            #endif
-            store.setNodeSnapshot(
-                FlowNodeSnapshot(cgImage: cgImage, scale: scale),
-                for: nodeID
-            )
-        } catch {
-        }
-    }
-
-    @MainActor
-    private func captureMapSnapshot(for node: FlowNode<LivePreviewData>) async {
-        guard case let .map(latitude, longitude, _) = node.data else { return }
-        let initialCoordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
-
-        let options = MKMapSnapshotter.Options()
-        if let mv = mapViewBag.mapViews[node.id] {
-            options.region = mv.region
-        } else if let region = mapViewBag.regions[node.id] {
-            options.region = region
-        } else {
-            options.region = MKCoordinateRegion(
-                center: initialCoordinate,
-                latitudinalMeters: 3000,
-                longitudinalMeters: 3000
-            )
-        }
-        options.size = node.size
-        #if os(iOS)
-        options.scale = 2
-        #endif
-
-        let snapshotter = MKMapSnapshotter(options: options)
-        do {
-            let snap = try await snapshotter.start()
-            #if os(iOS)
-            guard let cgImage = snap.image.cgImage else { return }
-            let scale = snap.image.scale
-            #elseif os(macOS)
-            var rect = CGRect(origin: .zero, size: snap.image.size)
-            guard let cgImage = snap.image.cgImage(
-                forProposedRect: &rect,
-                context: nil,
-                hints: nil
-            ) else { return }
-            let scale = CGFloat(cgImage.width) / max(snap.image.size.width, 1)
-            #endif
-            store.setNodeSnapshot(
-                FlowNodeSnapshot(cgImage: cgImage, scale: scale),
-                for: node.id
-            )
-        } catch {
-            // Snapshot failed (transient); next iteration will retry.
+    private func resizableColor(named name: String) -> Color {
+        switch name {
+        case "blue":   return .blue
+        case "orange": return .orange
+        case "green":  return .green
+        default:       return .gray
         }
     }
 }

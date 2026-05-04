@@ -244,6 +244,22 @@ public struct FlowCanvas<
     /// drawing nodes whose live overlay is covering them).
     @State private var liveNodeActivationCoordinator = LiveNodeActivationCoordinator()
 
+    // MARK: - Viewport Interaction
+
+    /// Latches `true` while the user is actively panning or zooming the
+    /// canvas. While set, `LiveNodeOverlay` unmounts its live rows and
+    /// the Canvas's `drawNodes` keeps drawing every node from its
+    /// rasterized poster — native representables (`MKMapView`,
+    /// `WKWebView`) are spared a tile / re-layout pass per gesture
+    /// frame, which is otherwise the dominant cost during pan / zoom.
+    @State private var isViewportInteracting = false
+
+    /// Trailing-edge timer that flips `isViewportInteracting` back to
+    /// `false` once the gesture stream goes quiet. macOS scroll wheel
+    /// and trackpad magnify deliver discrete events with no end signal,
+    /// so we drop interaction state after a short idle window.
+    @State private var viewportInteractionResetTask: Task<Void, Never>?
+
     public var body: some View {
         GeometryReader { geometry in
             canvasBody(in: geometry.size)
@@ -264,9 +280,22 @@ public struct FlowCanvas<
             drawConnectionDraft(context: &context, canvasSize: canvasSize)
         } symbols: {
             ForEach(store.nodes) { node in
-                nodeContentBuilder(node, nodeRenderContext(for: node))
+                let context = nodeRenderContext(for: node)
+                nodeContentBuilder(node, context)
                     .environment(\.flowNodeRenderPhase, .rasterize)
                     .environment(\.flowNodeID, node.id)
+                    .environment(
+                        \.liveNodeEnvironment,
+                        LiveNodeEnvironment(
+                            id: node.id,
+                            size: node.size,
+                            snapshot: context.snapshot
+                        )
+                    )
+                    .environment(
+                        \.flowNodeInteraction,
+                        nodeInteractionProxy(for: node)
+                    )
                     .tag(node.id)
             }
             if let edgeContentBuilder {
@@ -292,6 +321,10 @@ public struct FlowCanvas<
             handleTap(at: location, isAdditive: false)
         }
         .onDisappear {
+            viewportInteractionResetTask?.cancel()
+            viewportInteractionResetTask = nil
+            isViewportInteracting = false
+
             #if os(macOS)
             releaseDragCursorIfNeeded()
             #endif
@@ -318,10 +351,14 @@ public struct FlowCanvas<
         let hostView = CanvasHostView(
             onScroll: { delta, location in
                 guard store.configuration.panEnabled else { return }
+                beginViewportInteraction()
                 store.pan(by: delta)
+                scheduleEndViewportInteraction()
             },
             onMagnify: { magnification, location in
+                beginViewportInteraction()
                 store.zoom(by: 1 + magnification, anchor: location)
+                scheduleEndViewportInteraction()
             },
             cursorAt: { location in
                 switch dragMode {
@@ -366,8 +403,11 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
+                interactionProxy: { node in nodeInteractionProxy(for: node) },
                 activation: liveNodeActivationPredicate,
-                coordinator: liveNodeActivationCoordinator
+                coordinator: liveNodeActivationCoordinator,
+                setHoveredNode: { id in store.setHoveredNode(id) },
+                isViewportInteracting: isViewportInteracting
             )
             if hasAccessory {
                 AccessoryOverlay(
@@ -386,7 +426,9 @@ public struct FlowCanvas<
         let hostView = CanvasHostView(
             onPan: { delta in
                 guard store.configuration.panEnabled else { return }
+                beginViewportInteraction()
                 store.pan(by: delta)
+                scheduleEndViewportInteraction()
             },
             registeredDropTypes: registeredDropTypes,
             onDrop: dropHandler
@@ -412,8 +454,11 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
+                interactionProxy: { node in nodeInteractionProxy(for: node) },
                 activation: liveNodeActivationPredicate,
-                coordinator: liveNodeActivationCoordinator
+                coordinator: liveNodeActivationCoordinator,
+                setHoveredNode: { id in store.setHoveredNode(id) },
+                isViewportInteracting: isViewportInteracting
             )
             if hasAccessory {
                 AccessoryOverlay(
@@ -655,8 +700,14 @@ public struct FlowCanvas<
             // drawing (live view visible at opacity 1). Gated on both
             // `renderedActive` *and* live presence — a plain node that
             // becomes "active" on hover has no live view to hand off
-            // to, so Canvas must keep drawing it.
-            if liveNodeActivationCoordinator.overlayIsDrawing(node.id) {
+            // to, so Canvas must keep drawing it. While the user is
+            // mid-pan / mid-zoom we suppress this skip entirely so the
+            // Canvas keeps drawing every node from its poster — the
+            // overlay's live row is unmounted in that window, and
+            // skipping here would briefly drop the node from the
+            // canvas.
+            if !isViewportInteracting,
+               liveNodeActivationCoordinator.overlayIsDrawing(node.id) {
                 continue
             }
 
@@ -746,9 +797,15 @@ public struct FlowCanvas<
                             handleType: handleHit.handleType,
                             handlePosition: handleHit.handlePosition
                         )
-                    } else if let nodeID = store.hitTestNode(at: canvasPoint),
-                              let node = store.nodeLookup[nodeID],
-                              node.isDraggable {
+                    } else if let nodeID = store.hitTestNode(at: canvasPoint) {
+                        if liveNodeActivationCoordinator.liveNodeIDs.contains(nodeID) {
+                            dragMode = .none
+                            return
+                        }
+                        guard let node = store.nodeLookup[nodeID], node.isDraggable else {
+                            dragMode = .none
+                            return
+                        }
                         var startPositions: [String: CGPoint] = [:]
                         if node.isSelected, store.selectedNodeIDs.count > 1 {
                             for selectedID in store.selectedNodeIDs {
@@ -835,12 +892,14 @@ public struct FlowCanvas<
         MagnifyGesture()
             .onChanged { value in
                 guard store.configuration.zoomEnabled else { return }
+                beginViewportInteraction()
                 let factor = value.magnification / lastMagnification
                 lastMagnification = value.magnification
                 store.zoom(by: factor, anchor: value.startLocation)
             }
             .onEnded { _ in
                 lastMagnification = 1.0
+                endViewportInteractionImmediately()
             }
     }
 
@@ -942,6 +1001,29 @@ public struct FlowCanvas<
 
     #endif
 
+    // MARK: - Viewport Interaction
+
+    private func beginViewportInteraction() {
+        isViewportInteracting = true
+        viewportInteractionResetTask?.cancel()
+    }
+
+    private func scheduleEndViewportInteraction(after delay: UInt64 = 120_000_000) {
+        viewportInteractionResetTask?.cancel()
+        viewportInteractionResetTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delay)
+            if !Task.isCancelled {
+                isViewportInteracting = false
+            }
+        }
+    }
+
+    private func endViewportInteractionImmediately() {
+        viewportInteractionResetTask?.cancel()
+        viewportInteractionResetTask = nil
+        isViewportInteracting = false
+    }
+
     // MARK: - Drawing: Edges (symbol-based)
 
     private func drawEdgesViaSymbols(context: inout GraphicsContext, canvasSize: CGSize) {
@@ -1023,6 +1105,53 @@ public struct FlowCanvas<
         return NodeRenderContext(
             connectedHandleID: connectedHandleID,
             snapshot: store.nodeSnapshots[node.id]
+        )
+    }
+
+    private func nodeInteractionProxy(for node: FlowNode<NodeData>) -> FlowNodeInteractionProxy {
+        let nodeID = node.id
+        let store = store
+        return FlowNodeInteractionProxy(
+            nodeID: nodeID,
+            beginMove: {
+                guard let current = store.nodeLookup[nodeID] else { return [:] }
+                var starts: [String: CGPoint] = [:]
+                if current.isSelected, store.selectedNodeIDs.count > 1 {
+                    for id in store.selectedNodeIDs {
+                        if let other = store.nodeLookup[id], other.isDraggable {
+                            starts[id] = other.position
+                        }
+                    }
+                } else if current.isDraggable {
+                    starts[nodeID] = current.position
+                }
+                return starts
+            },
+            updateMove: { starts, translation in
+                let zoom = store.viewport.zoom
+                let dx = translation.width / zoom
+                let dy = translation.height / zoom
+                for (id, start) in starts {
+                    store.moveNode(id, to: CGPoint(
+                        x: start.x + dx,
+                        y: start.y + dy
+                    ))
+                }
+            },
+            endMove: { starts in
+                store.completeMoveNodes(from: starts)
+            },
+            selectNode: { additive in
+                if additive {
+                    if store.selectedNodeIDs.contains(nodeID) {
+                        store.deselectNode(nodeID)
+                    } else {
+                        store.selectNode(nodeID, exclusive: false)
+                    }
+                } else {
+                    store.selectNode(nodeID)
+                }
+            }
         )
     }
 

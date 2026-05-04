@@ -97,15 +97,22 @@ final class LiveNodeActivationCoordinator {
         captureHandlers[nodeID] = handler
     }
 
-    /// Clears all state for a node. Called by `LiveNode.onDisappear` so
-    /// viewport-culled or removed nodes don't leak task / handler entries.
+    /// Clears the capture handler for a node. **Does not** touch
+    /// `intent`, `renderedActive`, or in-flight deactivation tasks —
+    /// `LiveNode`'s `onDisappear` fires for view-tree reasons that are
+    /// not actually node deactivations (`.remountOnActivation` swapping
+    /// its inner content, viewport cull, transient parent re-layout),
+    /// and tearing down activation state from any of those would make
+    /// the overlay drop the row mid-display.
+    ///
+    /// Cancelling the deactivation task here is also wrong: the task
+    /// is the driver of `renderedActive.remove`, so cancelling it
+    /// after intent has gone false would leave the row stuck active.
+    /// Activation/deactivation is owned solely by
+    /// ``update(nodeID:intent:)``, which is driven by the predicate
+    /// edge.
     func unregisterCapture(for nodeID: String) {
         captureHandlers.removeValue(forKey: nodeID)
-        if let task = deactivationTasks.removeValue(forKey: nodeID) {
-            task.cancel()
-        }
-        intent.removeValue(forKey: nodeID)
-        renderedActive.remove(nodeID)
     }
 
     // MARK: - Intent → render-state transitions

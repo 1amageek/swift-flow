@@ -243,7 +243,8 @@ FlowCanvas(store: store) { node, ctx in
     LiveNode(
         node: node,
         context: ctx,
-        capture: .manual(capture: { await captureSnapshot(nodeID: nodeID) })
+        capture: .manual(capture: { await captureSnapshot(nodeID: nodeID) }),
+        mountPolicy: .persistent
     ) {
         WebViewRepresentable(url: node.data.url)
     } placeholder: {
@@ -279,6 +280,34 @@ func captureSnapshot(nodeID: String) async {
 
 All modes route their final capture through the deactivation coordinator: the live overlay stays mounted at opacity 1 until the capture returns, so the first frame the user sees after deactivation is the **new** snapshot, not the previous one.
 
+### Mount Policy
+
+`LiveNode` accepts a `mountPolicy:` argument that controls whether the overlay row hosting the live subtree is allowed to unmount while the node is inactive.
+
+| `LiveNodeMountPolicy` | Behavior |
+|---|---|
+| `.onActivation` *(default)* | The row mounts only while the activation predicate is true (or while the first snapshot is being warmed). Once the node deactivates, the live subtree leaves the view tree and the Canvas rasterize path takes over. Suitable for SwiftUI-only content — its state rebuilds from scratch on each remount and the captured snapshot fills the rasterize gap. |
+| `.persistent` | The row stays mounted continuously while the node is in viewport. The activation predicate only toggles `opacity` and hit-testing — the underlying view never detaches. **Required for native representables backed by a separate process** (`WKWebView`, `MKMapView`, `AVPlayerView`, `PDFView`). |
+
+Why native views need `.persistent`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the remote-layer subtree, which puts the WebContent / map tile / player processes into a dormant state. Reattachment does not reliably wake the `CARemoteLayerClient` / `CAMetalLayer` pipeline, so the surface stays blank from the second activation onward. With `.persistent` the native view stays mounted, its compositor never stalls, and URL / scroll / pan / zoom / playback state survives without any save/restore plumbing.
+
+The cost is that the WebContent / map / player process keeps running while the node is in viewport even when the user is not interacting with it — pick `.persistent` only for native nodes that need it, and leave SwiftUI-only `LiveNode`s on the default `.onActivation`.
+
+```swift
+LiveNode(
+    node: node,
+    context: ctx,
+    capture: .manual(capture: { await captureSnapshot(nodeID: nodeID) }),
+    mountPolicy: .persistent  // keep WKWebView's compositor alive across deactivations
+) {
+    WebViewRepresentable(url: node.data.url)
+} placeholder: {
+    ProgressView()
+}
+```
+
+The Poster pattern is unchanged by mount policy: while the node is inactive the Canvas always draws the stored `FlowNodeSnapshot` regardless of whether the live subtree is mounted underneath. `.persistent` only controls visibility, not whether the snapshot is shown.
+
 ### Activation
 
 By default a node is active when it is selected or hovered. Override with `.liveNodeActivation`:
@@ -290,7 +319,7 @@ By default a node is active when it is selected or hovered. Override with `.live
 }
 ```
 
-The overlay subtree stays mounted across activation toggles so `WKWebView` page state, scroll offset, JS execution, and player state all survive a deactivation — the overlay simply hides via opacity + hit-testing. Apps can pause their own internal loops while the node is hidden by reading the published `\.isFlowNodeActive` environment value:
+With `mountPolicy: .persistent`, the overlay subtree stays mounted across activation toggles so `WKWebView` page state, scroll offset, JS execution, and player state all survive a deactivation — the overlay simply hides via opacity + hit-testing. Apps can pause their own internal loops while the node is hidden by reading the published `\.isFlowNodeActive` environment value:
 
 ```swift
 struct WebViewRepresentable: UIViewRepresentable {

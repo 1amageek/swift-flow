@@ -1,359 +1,554 @@
 import SwiftUI
 
-/// Declares a node whose body should be rendered as a live SwiftUI view
-/// while the node is active, and as a rasterized snapshot while it is
-/// inactive — all from a single call site.
+// MARK: - LiveNode
+
+/// Declares a node whose body is rendered as a live SwiftUI view while
+/// active, and as a rasterized snapshot while inactive.
 ///
-/// `LiveNode` is a pure phase dispatcher: it emits the snapshot image on
-/// the rasterize path and the caller-supplied live view on the live
-/// path, and **applies no sizing, padding, clipping, or other styling**.
-/// All visual treatment — frame, corner radius, handle-border inset,
-/// background, overlay — is the caller's responsibility, composed with
-/// ordinary SwiftUI modifiers around `LiveNode`.
+/// `LiveNode` must be used inside a `FlowCanvas` `nodeContent` closure.
+/// The canvas injects the surrounding node's identity, size, and snapshot
+/// through the environment, so the call site stays small:
 ///
-/// ```
-/// FlowCanvas(store: store) { node, ctx in
-///     let inset = FlowHandle.diameter / 2
-///     LiveNode(node: node, context: ctx) {
-///         TimelineView(.animation) { tl in
-///             ClockFace(date: tl.date)
-///         }
-///     }
-///     .frame(width: node.size.width, height: node.size.height)
-///     .padding(inset)
-///     .overlay { FlowNodeHandles(node: node, context: ctx) }
+/// ```swift
+/// LiveNode {
+///     AnyKindView()
 /// }
 /// ```
 ///
-/// Capture of the snapshot used by the Canvas rasterize path is
-/// automatic for SwiftUI-only content (see ``LiveNodeCapture``). Native
-/// views (`WKWebView` / `MKMapView` / `AVPlayerView`) must use
-/// ``LiveNodeCapture/manual(capture:)`` and write `FlowNodeSnapshot`
-/// values via `FlowStore.setNodeSnapshot(_:for:)` themselves.
-public struct LiveNode<NodeData: Sendable & Hashable, Live: View, Placeholder: View>: View {
+/// Use the closure-with-context overload when the content needs to react
+/// to the node's activation state:
+///
+/// ```swift
+/// LiveNode { live in
+///     MapNode(...)
+///         .allowsHitTesting(live.isActive)
+/// }
+/// ```
+///
+/// By default, `LiveNode` assumes SwiftUI-only content:
+///
+/// ```swift
+/// .liveNodeMount(.onActivation)
+/// .liveNodeSnapshot(.automatic)
+/// ```
+///
+/// Native views such as `WKWebView`, `MKMapView`, and `AVPlayerView`
+/// should opt into native snapshot handling:
+///
+/// ```swift
+/// LiveNode {
+///     WebViewNode(url: url)
+/// }
+/// .liveNodeMount(.persistent)
+/// .liveNodeSnapshot(.native)
+/// ```
+///
+/// Native snapshot views can access `liveNodeNativeSnapshotContext` from
+/// the environment to:
+///
+/// - write ready-driven snapshots, e.g. after `WKNavigationDelegate.didFinish`
+/// - register a capture handler used when hover/activation ends
+public struct LiveNode<Content: View, Placeholder: View>: View {
 
-    private let node: FlowNode<NodeData>
-    private let context: NodeRenderContext
-    private let capture: LiveNodeCapture
-    private let mountPolicy: LiveNodeMountPolicy
-    private let live: () -> Live
+    private let explicitNode: LiveNodeDescriptor?
+    private let content: (LiveNodeContentContext) -> Content
     private let placeholder: () -> Placeholder
 
-    @Environment(\.flowNodeRenderPhase) private var phase
-    @Environment(\.isFlowNodeActive) private var isActive
-    @Environment(\.self) private var environment
-    @Environment(\.displayScale) private var displayScale
-    @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
-    @Environment(\.liveNodeActivationCoordinator) private var coordinator
+    @Environment(\.liveNodeEnvironment) private var liveNodeEnvironment
 
     public init(
-        node: FlowNode<NodeData>,
-        context: NodeRenderContext,
-        capture: LiveNodeCapture = .onDeactivation,
-        mountPolicy: LiveNodeMountPolicy = .onActivation,
-        @ViewBuilder live: @escaping () -> Live,
+        @ViewBuilder content: @escaping () -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) {
-        self.node = node
-        self.context = context
-        self.capture = capture
-        self.mountPolicy = mountPolicy
-        self.live = live
+        self.explicitNode = nil
+        self.content = { _ in content() }
+        self.placeholder = placeholder
+    }
+
+    public init(
+        @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) {
+        self.explicitNode = nil
+        self.content = content
+        self.placeholder = placeholder
+    }
+
+    public init<Data>(
+        node: FlowNode<Data>,
+        @ViewBuilder content: @escaping () -> Content,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) where Data: Sendable & Hashable {
+        self.explicitNode = LiveNodeDescriptor(node: node)
+        self.content = { _ in content() }
+        self.placeholder = placeholder
+    }
+
+    public init<Data>(
+        node: FlowNode<Data>,
+        @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content,
+        @ViewBuilder placeholder: @escaping () -> Placeholder
+    ) where Data: Sendable & Hashable {
+        self.explicitNode = LiveNodeDescriptor(node: node)
+        self.content = content
         self.placeholder = placeholder
     }
 
     public var body: some View {
-        // Pure phase dispatch. No frame, padding, clip, or other styling
-        // — the caller composes sizing and visual treatment outside.
-        //
-        // Preferences are published from the outer body (not just the
-        // live phase) so the Canvas's `symbols:` pass — which evaluates
-        // every LiveNode in `.rasterize` once per render — also feeds
-        // the coordinator's presence / policy maps. This is what closes
-        // the bootstrap window: by the time `LiveNodeOverlay` decides
-        // a row's mount policy, the policy preference has already been
-        // delivered through the Canvas's render, so a `.persistent`
-        // WKWebView never has to mount at opacity 0 on first appear
-        // (which strands its WebContent compositor in a dormant state).
-        contentBody
-            .preference(key: LiveNodePresenceKey.self, value: [node.id])
-            .preference(key: LiveNodeMountPolicyKey.self, value: [node.id: mountPolicy])
-    }
-
-    @ViewBuilder
-    private var contentBody: some View {
-        switch phase {
-        case .rasterize:
-            rasterizeBody
-        case .live:
-            liveBody
-        }
-    }
-
-    @ViewBuilder
-    private var rasterizeBody: some View {
-        if let snap = context.snapshot {
-            Image(snap.cgImage, scale: snap.scale, label: Text(verbatim: ""))
-                .resizable()
-                .interpolation(.high)
+        if let resolved = resolvedEnvironment {
+            LiveNodeCore(
+                environment: resolved,
+                content: content,
+                placeholder: placeholder
+            )
         } else {
-            // Placeholder covers two first-frame cases:
-            //   1. Viewport-culled nodes that haven't been hosted by the
-            //      overlay yet (their `liveBody.onAppear` hasn't fired).
-            //   2. Nodes whose `.manual(capture:)` handler is still
-            //      waiting on its native view to become snapshot-ready
-            //      (e.g. WKWebView is still loading the first page).
-            // Seed from here too; `seedSnapshotIfNeeded` guards on the
-            // current snapshot so duplicate `onAppear` calls are no-ops.
             placeholder()
-                .onAppear { seedSnapshotIfNeeded() }
         }
     }
 
-    /// Mounted only while the coordinator marks the row rendered-active;
-    /// deactivation unmounts the subtree so idle LiveNodes don't pay
-    /// per-frame SwiftUI / transform / TimelineView costs during canvas
-    /// pan and zoom.
+    /// Merge precedence:
     ///
-    /// Capture on deactivation is routed through
-    /// ``LiveNodeActivationCoordinator`` so the snapshot is written
-    /// **before** `renderedActive` flips false — the Canvas `resolveSymbol`
-    /// path then draws the fresh snapshot as the first visible frame
-    /// after unmount, with no stale-thumbnail flash.
-    ///
-    /// ## Snapshot backdrop
-    ///
-    /// The overlay and Canvas hand off via `overlayIsDrawing` — Canvas
-    /// stops drawing the rasterized snapshot exactly when the overlay
-    /// becomes opaque. That handoff is sub-frame clean on the SwiftUI
-    /// side, but compositor-backed surfaces (WKWebView / MKMapView /
-    /// AVPlayer) need at least one display commit to publish their
-    /// layer's backing store. For ``LiveNodeMountPolicy/onActivation``
-    /// rows we paint the stored snapshot behind the live view to fill
-    /// that one-frame gap — when Canvas stops drawing, the overlay
-    /// already has an identical still frame under the live content,
-    /// so there is nothing to flicker. Opaque live content (WKWebView,
-    /// MKMapView, most TimelineView scenes) fully covers the backdrop
-    /// once composited.
-    ///
-    /// ``LiveNodeMountPolicy/persistent`` rows skip the backdrop
-    /// entirely — Canvas always skips drawing for them, so no handoff
-    /// happens to begin with. More importantly, **adding** the Image
-    /// to the ZStack the first time `context.snapshot` becomes non-nil
-    /// (typically a few seconds after mount, when a `.manual` capture
-    /// handler finally writes its first snapshot) causes SwiftUI to
-    /// reassign the structural identity of `live()` at the next
-    /// position. For pure-SwiftUI content that's invisible, but for an
-    /// `NSViewRepresentable` / `UIViewRepresentable` it triggers a
-    /// fresh `makeNSView` which detaches and reattaches the underlying
-    /// `WKWebView` — within the same window, so
-    /// `viewDidMoveToWindow` never fires and the WebContent process's
-    /// compositor wake is missed. The visible result is that the web
-    /// view goes solid black several seconds into the session, exactly
-    /// when the snapshot capture lands.
-    @ViewBuilder
-    private var liveBody: some View {
-        let nodeID = node.id
-        ZStack {
-            if let snap = context.snapshot {
-                Image(snap.cgImage, scale: snap.scale, label: Text(verbatim: ""))
-                    .resizable()
-                    .interpolation(.high)
-                    .allowsHitTesting(false)
-            }
-            // Re-register on every inputs change so the handler closure
-            // always sees the latest `node.size`, caller-provided manual
-            // closure, etc. `SwiftUI.View` is a value type, so the closure
-            // registered from a stale `self` would otherwise capture inputs
-            // from the first mount only. The task id is cheap; registration
-            // itself is idempotent (just a dictionary overwrite).
-            live()
-                .onAppear { seedSnapshotIfNeeded() }
-                .onDisappear {
-                    coordinator?.unregisterCapture(for: nodeID)
-                }
-                .task(id: captureRegistrationIdentity) {
-                    registerCaptureHandler()
-                }
-                .modifier(PeriodicCaptureModifier(capture: capture, isActive: isActive, captureNow: captureNow, nodeID: nodeID))
+    /// 1. `LiveNode(node:)` overrides id and size.
+    /// 2. The Canvas-injected `liveNodeEnvironment` supplies the
+    ///    snapshot — and id / size when no explicit node is provided.
+    /// 3. Without either source, the placeholder is rendered.
+    private var resolvedEnvironment: LiveNodeEnvironment? {
+        if let explicitNode {
+            return LiveNodeEnvironment(
+                id: explicitNode.id,
+                size: explicitNode.size,
+                snapshot: liveNodeEnvironment?.snapshot
+            )
         }
-    }
-
-    /// Identity string that rebuilds the registration task whenever
-    /// inputs the handler depends on change. `.manual` users that swap
-    /// the capture closure across body evaluations should bump something
-    /// observable on the outer view to trigger re-registration; in
-    /// practice the stable tuple below covers SwiftUI-only and native
-    /// representable call sites.
-    private var captureRegistrationIdentity: String {
-        let mode: String
-        switch capture {
-        case .onDeactivation: mode = "d"
-        case .periodic(let i): mode = "p\(i)"
-        case .manual: mode = "m"
-        }
-        return "\(node.id)|\(Int(node.size.width))x\(Int(node.size.height))|\(mode)"
-    }
-
-    /// Registers the mode-specific capture handler with the overlay
-    /// coordinator. `onDeactivation` / `periodic` route through
-    /// `captureNow()` (ImageRenderer); `.manual(capture:)` forwards the
-    /// caller-supplied async closure.
-    @MainActor
-    private func registerCaptureHandler() {
-        guard let coordinator else { return }
-        let nodeID = node.id
-        switch capture {
-        case .onDeactivation, .periodic:
-            coordinator.registerCapture(for: nodeID) {
-                await captureNowAwaitable()
-            }
-        case .manual(let handler):
-            coordinator.registerCapture(for: nodeID, handler: handler)
-        }
-    }
-
-    /// `ImageRenderer` is synchronous, but exposing it as `async` keeps
-    /// the coordinator's handler signature uniform and lets a future
-    /// implementation swap in an off-thread rasterizer without touching
-    /// the coordinator.
-    @MainActor
-    private func captureNowAwaitable() async {
-        captureNow()
-    }
-
-    /// Ensures the rasterize path has something to draw before the user
-    /// ever activates the node — without it, the first frame after mount
-    /// shows the placeholder until a full hover → unhover cycle completes.
-    ///
-    /// - `.onDeactivation` / `.periodic`: synchronous `ImageRenderer`
-    ///   produces a thumbnail immediately.
-    /// - `.manual(capture:)`: the library cannot know when the caller's
-    ///   native view (WKWebView, MKMapView, AVPlayerView, …) is ready
-    ///   to produce a meaningful frame — calling the handler on mount
-    ///   would capture an unloaded / blank surface and pollute the
-    ///   snapshot cache. The caller signals readiness themselves (e.g.
-    ///   `WKNavigationDelegate.didFinish`, `MKMapViewDelegate.mapViewDidFinishRenderingMap`,
-    ///   `AVPlayer` status KVO) and invokes capture from there.
-    @MainActor
-    private func seedSnapshotIfNeeded() {
-        guard context.snapshot == nil else { return }
-        switch capture {
-        case .onDeactivation, .periodic:
-            captureNow()
-        case .manual:
-            break
-        }
-    }
-
-    @MainActor
-    private func captureNow() {
-        guard let writer = snapshotWriter else { return }
-        let scale = min(max(displayScale * 2, 2), 4)
-        let renderer = ImageRenderer(
-            content: live()
-                .frame(width: node.size.width, height: node.size.height)
-                .environment(\.self, environment)
-        )
-        renderer.scale = scale
-        guard let cgImage = renderer.cgImage else { return }
-        writer(node.id, FlowNodeSnapshot(cgImage: cgImage, scale: scale))
-    }
-}
-
-// MARK: - Periodic capture
-
-/// Applies the periodic capture loop only when ``LiveNodeCapture/periodic``
-/// is selected. Extracted into a modifier so `LiveNode.liveBody` stays
-/// declarative and avoids a per-mode switch that would force every capture
-/// mode to pay the `.task(id:)` rebuild cost.
-private struct PeriodicCaptureModifier: ViewModifier {
-    let capture: LiveNodeCapture
-    let isActive: Bool
-    let captureNow: @MainActor () -> Void
-    let nodeID: String
-
-    func body(content: Content) -> some View {
-        switch capture {
-        case .periodic(let interval):
-            content.task(id: "\(nodeID)|active=\(isActive)") {
-                guard isActive else { return }
-                let nanos = UInt64(max(interval, 0.05) * 1_000_000_000)
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: nanos)
-                    if Task.isCancelled { return }
-                    await MainActor.run { captureNow() }
-                }
-            }
-        case .onDeactivation, .manual:
-            content
-        }
-    }
-}
-
-// MARK: - Default placeholder
-
-/// Default placeholder used by `LiveNode` when the caller omits its own.
-/// A muted rectangle that fades cleanly against most canvas backgrounds
-/// while a snapshot is being produced.
-public struct FlowDefaultPlaceholder: View {
-    public init() {}
-    public var body: some View {
-        Rectangle().fill(Color.secondary.opacity(0.08))
+        return liveNodeEnvironment
     }
 }
 
 extension LiveNode where Placeholder == FlowDefaultPlaceholder {
     public init(
-        node: FlowNode<NodeData>,
-        context: NodeRenderContext,
-        capture: LiveNodeCapture = .onDeactivation,
-        @ViewBuilder live: @escaping () -> Live
+        @ViewBuilder content: @escaping () -> Content
     ) {
         self.init(
+            content: content,
+            placeholder: { FlowDefaultPlaceholder() }
+        )
+    }
+
+    public init(
+        @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content
+    ) {
+        self.init(
+            content: content,
+            placeholder: { FlowDefaultPlaceholder() }
+        )
+    }
+
+    public init<Data>(
+        node: FlowNode<Data>,
+        @ViewBuilder content: @escaping () -> Content
+    ) where Data: Sendable & Hashable {
+        self.init(
             node: node,
-            context: context,
-            capture: capture,
-            live: live,
+            content: content,
+            placeholder: { FlowDefaultPlaceholder() }
+        )
+    }
+
+    public init<Data>(
+        node: FlowNode<Data>,
+        @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content
+    ) where Data: Sendable & Hashable {
+        self.init(
+            node: node,
+            content: content,
             placeholder: { FlowDefaultPlaceholder() }
         )
     }
 }
 
-// MARK: - Presence preference
+// MARK: - Core
 
-/// Collects the IDs of nodes whose `nodeContent` actually contains a
-/// `LiveNode` in the live phase. `LiveNodeOverlay` reads this to decide,
-/// per-row, whether to pay the hit-testing cost of the hosting layer —
-/// plain (non-live) nodes leave their row at opacity 0 with hit testing
-/// disabled so Canvas-level drag / selection gestures pass straight
-/// through.
-public struct LiveNodePresenceKey: PreferenceKey {
-    public static let defaultValue: Set<String> = []
-    public static func reduce(value: inout Set<String>, nextValue: () -> Set<String>) {
-        value.formUnion(nextValue())
+private struct LiveNodeCore<Content: View, Placeholder: View>: View {
+
+    let environment: LiveNodeEnvironment
+    let content: (LiveNodeContentContext) -> Content
+    let placeholder: () -> Placeholder
+
+    @Environment(\.flowNodeRenderPhase) private var phase
+    @Environment(\.isFlowNodeActive) private var isActive
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.self) private var swiftUIEnvironment
+    @Environment(\.liveNodeConfiguration) private var configuration
+    @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
+    @Environment(\.liveNodeActivationCoordinator) private var coordinator
+
+    @StateObject private var nativeCaptureRegistry = LiveNodeNativeCaptureRegistry()
+
+    @State private var remountGeneration: Int = 0
+    @State private var previousActiveState: Bool = false
+
+    private var contentContext: LiveNodeContentContext {
+        LiveNodeContentContext(
+            id: environment.id,
+            size: environment.size,
+            snapshot: environment.snapshot,
+            isActive: isActive
+        )
+    }
+
+    var body: some View {
+        phaseBody
+            .frame(width: environment.size.width, height: environment.size.height)
+            .preference(key: LiveNodePresenceKey.self, value: [environment.id])
+            .preference(
+                key: LiveNodeMountPolicyKey.self,
+                value: [environment.id: configuration.mountPolicy]
+            )
+            .onAppear {
+                previousActiveState = isActive
+            }
+            .onChange(of: isActive) { _, newValue in
+                handleActiveStateChange(newValue)
+            }
+    }
+
+    @ViewBuilder
+    private var phaseBody: some View {
+        switch phase {
+        case .rasterize:
+            RasterizedNodeBody(
+                snapshot: environment.snapshot,
+                placeholder: placeholder,
+                seedSnapshotIfNeeded: seedSnapshotIfNeeded
+            )
+
+        case .live:
+            LiveNodeLiveBody(
+                snapshot: environment.snapshot,
+                mountPolicy: configuration.mountPolicy,
+                remountGeneration: remountGeneration,
+                content: { content(contentContext) }
+            )
+            .environment(\.liveNodeNativeSnapshotContext, makeNativeSnapshotContext())
+            .modifier(
+                LiveNodeCaptureLifecycleModifier(
+                    nodeID: environment.id,
+                    nodeSize: environment.size,
+                    snapshotPolicy: configuration.snapshotPolicy,
+                    isActive: isActive,
+                    registerDeactivationCapture: registerDeactivationCapture,
+                    unregisterDeactivationCapture: unregisterDeactivationCapture,
+                    captureNow: captureNow
+                )
+            )
+            .onAppear {
+                seedSnapshotIfNeeded()
+            }
+        }
+    }
+
+    private func handleActiveStateChange(_ isNowActive: Bool) {
+        defer { previousActiveState = isNowActive }
+
+        guard isNowActive, previousActiveState == false else {
+            return
+        }
+
+        if configuration.mountPolicy == .remountOnActivation {
+            remountGeneration += 1
+        }
+
+        if configuration.snapshotPolicy.triggers.onActivation {
+            Task { @MainActor in
+                await captureNow()
+            }
+        }
+    }
+
+    @MainActor
+    private func seedSnapshotIfNeeded() {
+        guard environment.snapshot == nil else { return }
+        guard configuration.snapshotPolicy.triggers.seedOnAppear else { return }
+
+        switch configuration.snapshotPolicy.source {
+        case .swiftUI:
+            Task { @MainActor in
+                await captureNow()
+            }
+
+        case .native, .disabled:
+            break
+        }
+    }
+
+    @MainActor
+    private func registerDeactivationCapture() {
+        guard configuration.snapshotPolicy.triggers.onDeactivation else { return }
+        guard configuration.snapshotPolicy.source != .disabled else { return }
+
+        coordinator?.registerCapture(for: environment.id) {
+            await captureNow()
+        }
+    }
+
+    @MainActor
+    private func unregisterDeactivationCapture() {
+        coordinator?.unregisterCapture(for: environment.id)
+    }
+
+    @MainActor
+    private func captureNow() async {
+        switch configuration.snapshotPolicy.source {
+        case .swiftUI:
+            captureSwiftUIView()
+
+        case .native:
+            await captureNativeView()
+
+        case .disabled:
+            break
+        }
+    }
+
+    @MainActor
+    private func captureSwiftUIView() {
+        guard let snapshotWriter else { return }
+
+        let scale = captureScale
+
+        let renderer = ImageRenderer(
+            content:
+                content(contentContext)
+                .frame(width: environment.size.width, height: environment.size.height)
+                .environment(\.self, swiftUIEnvironment)
+        )
+
+        renderer.scale = scale
+
+        guard let cgImage = renderer.cgImage else {
+            return
+        }
+
+        snapshotWriter(
+            environment.id,
+            FlowNodeSnapshot(
+                cgImage: cgImage,
+                scale: scale
+            )
+        )
+    }
+
+    @MainActor
+    private func captureNativeView() async {
+        guard let snapshotWriter else { return }
+        guard let handler = nativeCaptureRegistry.captureHandler else { return }
+        guard let snapshot = await handler() else { return }
+
+        snapshotWriter(environment.id, snapshot)
+    }
+
+    private var captureScale: CGFloat {
+        min(max(displayScale * 2, 2), 4)
+    }
+
+    @MainActor
+    private func makeNativeSnapshotContext() -> LiveNodeNativeSnapshotContext {
+        LiveNodeNativeSnapshotContext(
+            nodeID: environment.id,
+            write: { snapshot in
+                // Ready-driven path. Only honored when the policy
+                // explicitly opts into ready-driven writes — high-
+                // frequency delegates can otherwise trigger a feedback
+                // loop through the store re-render.
+                guard configuration.snapshotPolicy.triggers.readyDriven else {
+                    return
+                }
+                snapshotWriter?(environment.id, snapshot)
+            },
+            registerCapture: { handler in
+                nativeCaptureRegistry.captureHandler = handler
+
+                guard configuration.snapshotPolicy.triggers.onDeactivation else {
+                    return
+                }
+
+                coordinator?.registerCapture(for: environment.id) {
+                    guard let snapshot = await handler() else {
+                        return
+                    }
+
+                    await MainActor.run {
+                        snapshotWriter?(environment.id, snapshot)
+                    }
+                }
+            },
+            unregisterCapture: {
+                // Only clear the native capture handler. Native views
+                // can dismantle for non-deactivation reasons (e.g. a
+                // `.id()`-driven remount, viewport churn), and tearing
+                // down `renderedActive` from here cascades into the
+                // coordinator and immediately deactivates the row that
+                // just remounted. The LiveNode's own
+                // `LiveNodeCaptureLifecycleModifier.onDisappear` is the
+                // single owner of activation-coordinator teardown.
+                nativeCaptureRegistry.captureHandler = nil
+            },
+            requestCapture: {
+                // Manual path. Only honored when the policy enables it,
+                // so a Representable wired up against an arbitrary policy
+                // cannot accidentally drive the write pipeline.
+                guard configuration.snapshotPolicy.triggers.manual else {
+                    return
+                }
+                await captureNativeView()
+            }
+        )
     }
 }
 
-// MARK: - Mount policy preference
+// MARK: - Rasterized Body
 
-/// Aggregates the per-node mount policy that ``LiveNode`` declares for
-/// itself, so `LiveNodeOverlay` can decide whether each row mounts on
-/// activation only or stays mounted for the life of its viewport
-/// presence. Last-write-wins on the rare merge — a node ID emitting
-/// from two LiveNodes would already be a programmer error caught by
-/// the deduplicated `LiveNodePresenceKey`.
-public struct LiveNodeMountPolicyKey: PreferenceKey {
-    public static let defaultValue: [String: LiveNodeMountPolicy] = [:]
-    public static func reduce(
-        value: inout [String: LiveNodeMountPolicy],
-        nextValue: () -> [String: LiveNodeMountPolicy]
-    ) {
-        value.merge(nextValue()) { _, new in new }
+private struct RasterizedNodeBody<Placeholder: View>: View {
+    let snapshot: FlowNodeSnapshot?
+    let placeholder: () -> Placeholder
+    let seedSnapshotIfNeeded: @MainActor () -> Void
+
+    var body: some View {
+        Group {
+            if let snapshot {
+                SnapshotImage(snapshot: snapshot)
+            } else {
+                placeholder()
+                    .onAppear {
+                        seedSnapshotIfNeeded()
+                    }
+            }
+        }
     }
 }
 
-// MARK: - Snapshot writer environment
+// MARK: - Live Body
+
+private struct LiveNodeLiveBody<Content: View>: View {
+    let snapshot: FlowNodeSnapshot?
+    let mountPolicy: LiveNodeMountPolicy
+    let remountGeneration: Int
+    let content: () -> Content
+
+    var body: some View {
+        ZStack {
+            if shouldDrawSnapshotBackdrop, let snapshot {
+                SnapshotImage(snapshot: snapshot)
+                    .allowsHitTesting(false)
+            }
+
+            content()
+                .id(contentIdentity)
+        }
+    }
+
+    private var shouldDrawSnapshotBackdrop: Bool {
+        switch mountPolicy {
+        case .onActivation, .remountOnActivation:
+            return true
+
+        case .persistent:
+            return false
+        }
+    }
+
+    private var contentIdentity: String {
+        switch mountPolicy {
+        case .onActivation, .persistent:
+            return "stable"
+
+        case .remountOnActivation:
+            return "remount-\(remountGeneration)"
+        }
+    }
+}
+
+// MARK: - Snapshot Image
+
+private struct SnapshotImage: View {
+    let snapshot: FlowNodeSnapshot
+
+    var body: some View {
+        Image(snapshot.cgImage, scale: snapshot.scale, label: Text(verbatim: ""))
+            .resizable()
+            .interpolation(.high)
+    }
+}
+
+// MARK: - Capture Lifecycle
+
+private struct LiveNodeCaptureLifecycleModifier: ViewModifier {
+    let nodeID: String
+    let nodeSize: CGSize
+    let snapshotPolicy: LiveNodeSnapshotPolicy
+    let isActive: Bool
+
+    let registerDeactivationCapture: @MainActor () -> Void
+    let unregisterDeactivationCapture: @MainActor () -> Void
+    let captureNow: @MainActor () async -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .task(id: registrationIdentity) {
+                registerDeactivationCapture()
+            }
+            .onDisappear {
+                unregisterDeactivationCapture()
+            }
+            .task(id: periodicIdentity) {
+                await runPeriodicCaptureLoopIfNeeded()
+            }
+    }
+
+    private var registrationIdentity: String {
+        [
+            nodeID,
+            "\(Int(nodeSize.width))x\(Int(nodeSize.height))",
+            snapshotPolicy.registrationIdentity
+        ].joined(separator: "|")
+    }
+
+    private var periodicIdentity: String {
+        [
+            nodeID,
+            "\(Int(nodeSize.width))x\(Int(nodeSize.height))",
+            snapshotPolicy.registrationIdentity,
+            "active=\(isActive)"
+        ].joined(separator: "|")
+    }
+
+    private func runPeriodicCaptureLoopIfNeeded() async {
+        guard isActive else { return }
+        guard let interval = snapshotPolicy.triggers.periodicInterval else { return }
+        guard snapshotPolicy.source != .disabled else { return }
+
+        let nanos = UInt64(max(interval, 0.05) * 1_000_000_000)
+
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: nanos)
+
+            if Task.isCancelled {
+                return
+            }
+
+            await captureNow()
+        }
+    }
+}
+
+// MARK: - Native Capture Registry
+
+@MainActor
+private final class LiveNodeNativeCaptureRegistry: ObservableObject {
+    var captureHandler: (@MainActor () async -> FlowNodeSnapshot?)?
+}
+
+// MARK: - Snapshot Writer Environment
 
 private struct FlowLiveNodeSnapshotWriterKey: EnvironmentKey {
     static let defaultValue: (@MainActor (String, FlowNodeSnapshot) -> Void)? = nil
@@ -361,8 +556,8 @@ private struct FlowLiveNodeSnapshotWriterKey: EnvironmentKey {
 
 extension EnvironmentValues {
     /// Closure injected by `FlowCanvas` that lets `LiveNode` deposit
-    /// captured snapshots into the owning `FlowStore` without knowing the
-    /// store's `Data` generic parameter.
+    /// captured snapshots into the owning store without knowing the
+    /// store's generic type.
     var flowLiveNodeSnapshotWriter: (@MainActor (String, FlowNodeSnapshot) -> Void)? {
         get { self[FlowLiveNodeSnapshotWriterKey.self] }
         set { self[FlowLiveNodeSnapshotWriterKey.self] = newValue }

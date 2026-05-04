@@ -70,8 +70,11 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
     let canvasSize: CGSize
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
     let renderContext: (FlowNode<NodeData>) -> NodeRenderContext
+    let interactionProxy: (FlowNode<NodeData>) -> FlowNodeInteractionProxy
     let activation: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool
     let coordinator: LiveNodeActivationCoordinator
+    let setHoveredNode: @MainActor (String?) -> Void
+    let isViewportInteracting: Bool
 
     /// Screen-pixel inflation applied to the visible canvas rect so nodes
     /// a short pan away are pre-mounted for smooth scroll-in.
@@ -163,9 +166,22 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
             // LiveNode in `.rasterize` phase renders its snapshot
             // image (or a `FlowDefaultPlaceholder`) — both cheap.
             ForEach(store.nodes) { node in
-                nodeContent(node, renderContext(node))
+                let context = renderContext(node)
+                nodeContent(node, context)
                     .environment(\.flowNodeRenderPhase, .rasterize)
                     .environment(\.flowNodeID, node.id)
+                    .environment(
+                        \.liveNodeEnvironment,
+                        LiveNodeEnvironment(
+                            id: node.id,
+                            size: node.size,
+                            snapshot: context.snapshot
+                        )
+                    )
+                    .environment(
+                        \.flowNodeInteraction,
+                        interactionProxy(node)
+                    )
                     .frame(width: 0, height: 0)
                     .opacity(0)
                     .allowsHitTesting(false)
@@ -178,19 +194,35 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                 // `renderedActive` on first hover/select. Mutation of
                 // `@Observable` state happens inside `.onChange`, never
                 // during body, to avoid self-invalidating the render.
+                //
+                // `displayActive` reads raw intent OR renderedActive —
+                // not gated on `liveNodeIDs`, because the presence
+                // preference can transiently drop entries during a
+                // re-render (LiveNode's outer `if liveNodeEnvironment`
+                // branch, ForEach rebuild) and a single empty cycle
+                // would tear the row down even though the user still
+                // wants the node active. The plain-row pass-through is
+                // handled inside `LiveNodeOverlayRow` (rows whose
+                // `nodeContent` doesn't contain a `LiveNode` simply
+                // render no live view, leaving the Canvas rasterize
+                // path as the sole drawer).
                 let intent = activation(node, store)
-                let isRenderedActive = coordinator.isRenderedActive(node.id)
+                let renderedActive = coordinator.isRenderedActive(node.id)
                 let mountPolicy = coordinator.mountPolicy(for: node.id)
+                let displayActive = intent || renderedActive
                 LiveNodeOverlayRow(
                     node: node,
                     viewport: viewport,
                     handleInset: handleInset,
-                    isRenderedActive: isRenderedActive,
-                    shouldShow: coordinator.overlayIsDrawing(node.id),
-                    isHittable: coordinator.overlayIsHittable(node.id),
+                    isRenderedActive: displayActive,
+                    shouldShow: displayActive && !isViewportInteracting,
+                    isHittable: displayActive && !isViewportInteracting,
+                    isViewportInteracting: isViewportInteracting,
                     mountPolicy: mountPolicy,
                     renderContext: renderContext(node),
-                    nodeContent: nodeContent
+                    interactionProxy: interactionProxy(node),
+                    nodeContent: nodeContent,
+                    setHoveredNode: setHoveredNode
                 )
                 .onChange(of: intent, initial: true) { _, newIntent in
                     coordinator.update(nodeID: node.id, intent: newIntent)
@@ -199,14 +231,30 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
         .environment(\.liveNodeActivationCoordinator, coordinator)
-        .onPreferenceChange(LiveNodePresenceKey.self) { [coordinator] ids in
+        .onPreferenceChange(LiveNodePresenceKey.self) { [coordinator, store] ids in
+            // Merge into the existing presence set rather than replacing
+            // it. SwiftUI may publish a transient empty cycle during a
+            // ForEach rebuild or LiveNode `if` branch flip; a direct
+            // assignment would tear `liveNodeIDs` down even though the
+            // node body still wants to be live. The store's current set
+            // of node IDs is the authoritative gate that drops entries
+            // for removed nodes.
             Task { @MainActor in
-                coordinator.liveNodeIDs = ids
+                let storeNodeIDs = Set(store.nodes.map(\.id))
+                let merged = coordinator.liveNodeIDs.union(ids)
+                coordinator.liveNodeIDs = merged.intersection(storeNodeIDs)
             }
         }
-        .onPreferenceChange(LiveNodeMountPolicyKey.self) { [coordinator] policies in
+        .onPreferenceChange(LiveNodeMountPolicyKey.self) { [coordinator, store] policies in
+            // Same merge + intersection rule: keep previously-published
+            // policies, fold the latest cycle in, then prune entries for
+            // nodes no longer in the store.
             Task { @MainActor in
-                coordinator.liveNodeMountPolicies = policies
+                let storeNodeIDs = Set(store.nodes.map(\.id))
+                var merged = coordinator.liveNodeMountPolicies
+                merged.merge(policies) { _, new in new }
+                merged = merged.filter { storeNodeIDs.contains($0.key) }
+                coordinator.liveNodeMountPolicies = merged
             }
         }
     }
@@ -236,9 +284,12 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     let isRenderedActive: Bool
     let shouldShow: Bool
     let isHittable: Bool
+    let isViewportInteracting: Bool
     let mountPolicy: LiveNodeMountPolicy
     let renderContext: NodeRenderContext
+    let interactionProxy: FlowNodeInteractionProxy
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
+    let setHoveredNode: @MainActor (String?) -> Void
 
     /// Mount decision depends on the per-node mount policy:
     ///
@@ -255,10 +306,21 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     ///   into the remote-layer subtree and stalls the
     ///   CARemoteLayerClient / CAMetalLayer pipeline; keeping the
     ///   row mounted avoids that detach entirely.
+    ///
+    /// While the user is panning or zooming the canvas the live
+    /// subtree is unmounted unconditionally — the Canvas poster (the
+    /// stored snapshot, or a placeholder) takes over for the duration
+    /// of the gesture so native representables (`MKMapView`,
+    /// `WKWebView`) are not subjected to live re-layout each frame.
     private var shouldMount: Bool {
+        if isViewportInteracting {
+            return false
+        }
+
         switch mountPolicy {
-        case .onActivation:
+        case .onActivation, .remountOnActivation:
             return isRenderedActive || renderContext.snapshot == nil
+
         case .persistent:
             return true
         }
@@ -267,21 +329,56 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     var body: some View {
         if shouldMount {
             let screenOrigin = viewport.canvasToScreen(node.position)
+            // The warmup window is the only time a `.native` LiveNode
+            // gets to seed its first snapshot. Native policies do not
+            // self-seed (`seedOnAppear: false`), and the Canvas poster
+            // takes over once a snapshot exists — so until one lands
+            // we mount the live subtree visibly and treat it as
+            // active, which lets `MKMapView` / `WKWebView` kick their
+            // tile / load pipeline. Hit testing stays off during
+            // warmup so the user can't interact with a node that
+            // isn't user-active yet (Canvas-level gestures still
+            // pass through to selection / drag).
+            let isWarmingUp = renderContext.snapshot == nil
+            let effectiveActive = isRenderedActive || isWarmingUp
+            let effectiveVisible = shouldShow || isWarmingUp
+            let effectiveHittable = isHittable && !isWarmingUp
+
             nodeContent(node, renderContext)
                 .environment(\.flowNodeRenderPhase, .live)
                 .environment(\.flowNodeID, node.id)
-                .environment(\.isFlowNodeActive, isRenderedActive)
+                .environment(\.isFlowNodeActive, effectiveActive)
+                .environment(
+                    \.liveNodeEnvironment,
+                    LiveNodeEnvironment(
+                        id: node.id,
+                        size: node.size,
+                        snapshot: renderContext.snapshot
+                    )
+                )
+                .environment(\.flowNodeInteraction, interactionProxy)
                 .frame(
                     width: node.size.width + handleInset * 2,
                     height: node.size.height + handleInset * 2
                 )
+                .contentShape(Rectangle())
                 .scaleEffect(viewport.zoom, anchor: .topLeading)
                 .offset(
                     x: screenOrigin.x - handleInset * viewport.zoom,
                     y: screenOrigin.y - handleInset * viewport.zoom
                 )
-                .opacity(shouldShow ? 1 : 0)
-                .allowsHitTesting(isHittable)
+                .opacity(effectiveVisible ? 1 : 0)
+                .allowsHitTesting(effectiveHittable)
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active:
+                        setHoveredNode(node.id)
+                    case .ended:
+                        setHoveredNode(nil)
+                    @unknown default:
+                        break
+                    }
+                }
         } else {
             Color.clear.frame(width: 0, height: 0)
         }

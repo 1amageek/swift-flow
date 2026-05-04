@@ -1,4 +1,4 @@
-#if os(iOS) || os(macOS)
+#if DEBUG && (os(iOS) || os(macOS))
 import SwiftUI
 import MapKit
 import CoreLocation
@@ -15,11 +15,11 @@ import CoreLocation
 /// remount cycles.
 @MainActor
 @Observable
-public final class LiveMapNodeStateStore {
+final class LiveMapNodeStateStore {
 
-    public var regions: [String: MKCoordinateRegion] = [:]
+    var regions: [String: MKCoordinateRegion] = [:]
 
-    public init() {}
+    init() {}
 }
 
 // MARK: - Public View
@@ -62,14 +62,14 @@ public final class LiveMapNodeStateStore {
 ///     .overlay { FlowNodeHandles(node: node, context: context) }
 /// }
 /// ```
-public struct LiveMapNode<Data>: View where Data: Sendable & Hashable {
+struct LiveMapNode<Data>: View where Data: Sendable & Hashable {
 
     private let node: FlowNode<Data>
     private let initialCoordinate: CLLocationCoordinate2D
     private let stateStore: LiveMapNodeStateStore
     private let cornerRadius: CGFloat
 
-    public init(
+    init(
         node: FlowNode<Data>,
         initialCoordinate: CLLocationCoordinate2D,
         stateStore: LiveMapNodeStateStore,
@@ -81,7 +81,7 @@ public struct LiveMapNode<Data>: View where Data: Sendable & Hashable {
         self.cornerRadius = cornerRadius
     }
 
-    public var body: some View {
+    var body: some View {
         LiveNode(
             node: node,
             mount: .remountOnActivation,

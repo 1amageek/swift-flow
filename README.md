@@ -294,7 +294,7 @@ extension WKWebView {
 }
 ```
 
-`MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). See `Sources/SwiftFlow/Examples/LiveMapNode.swift` for a complete `MKMapView` reference implementation including activation kicks for the tile pipeline and per-node region persistence.
+`MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). `MKMapView` additionally needs `mount: .remountOnActivation` rather than `.persistent` — see [Mount Policy](#mount-policy) for why.
 
 ### Snapshot Policy
 
@@ -316,12 +316,12 @@ Captures all route through the deactivation coordinator: the live overlay stays 
 | `LiveNodeMountPolicy` | Behavior |
 |---|---|
 | `.onActivation` *(default)* | The row mounts only while the activation predicate is true (or while the first snapshot is being warmed). Once the node deactivates, the live subtree leaves the view tree and the Canvas rasterize path takes over. Suitable for SwiftUI-only content — its state rebuilds from scratch on each remount and the captured snapshot fills the rasterize gap. |
-| `.remountOnActivation` | Same mount/unmount cadence as `.onActivation`, but each activation gives the live body a fresh SwiftUI identity so any `@State` resets. Use when the live content has stale internal state that needs to be reinitialized on each activation. |
-| `.persistent` | The row stays mounted continuously while the node is in viewport. The activation predicate only toggles `opacity` and hit-testing — the underlying view never detaches. **Required for native representables backed by a separate process** (`WKWebView`, `MKMapView`, `AVPlayerView`, `PDFView`). |
+| `.remountOnActivation` | Same mount/unmount cadence as `.onActivation`, but each activation gives the live body a fresh SwiftUI identity so any `@State` resets. **Required for `MKMapView`** — its tile pipeline goes dormant on detach and does not recover when reattached, so each activation needs a brand-new `MKMapView` instance. Also useful for any live content whose internal state needs to be reinitialized per activation. |
+| `.persistent` | The row stays mounted continuously while the node is in viewport. The activation predicate only toggles `opacity` and hit-testing — the underlying view never detaches. **Required for `WKWebView`** and other views backed by a long-lived helper process whose compositor stalls when the view is detached (e.g. `AVPlayerView`, `PDFView`). |
 
-Why native views need `.persistent`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the remote-layer subtree, which puts the WebContent / map tile / player processes into a dormant state. Reattachment does not reliably wake the `CARemoteLayerClient` / `CAMetalLayer` pipeline, so the surface stays blank from the second activation onward. With `.persistent` the native view stays mounted, its compositor never stalls, and URL / scroll / pan / zoom / playback state survives without any save/restore plumbing.
+Why native views split between `.persistent` and `.remountOnActivation`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the platform's out-of-process renderer, and different frameworks recover from that differently. `WKWebView`'s WebContent process goes dormant on detach but can be coaxed back to life if the same instance is kept mounted across activation toggles — so `.persistent` works and preserves URL / scroll / JS state for free. `MKMapView`'s tile pipeline also goes dormant on detach, but reattaching the same instance does **not** reliably wake the `CAMetalLayer` pipeline, so each activation must get a fresh `MKMapView` (under `.remountOnActivation`) plus app-layer region persistence to keep pan/zoom across remount cycles.
 
-The cost is that the WebContent / map / player process keeps running while the node is in viewport even when the user is not interacting with it — pick `.persistent` only for native nodes that need it, and leave SwiftUI-only `LiveNode`s on the default `.onActivation`.
+The cost of `.persistent` is that the helper process keeps running while the node is in viewport even when the user is not interacting with it. The cost of `.remountOnActivation` is that the live view's `@State` is rebuilt on each activation. Pick the policy that matches the framework's lifecycle, and leave SwiftUI-only `LiveNode`s on the default `.onActivation`.
 
 The Poster pattern is unchanged by mount policy: while the node is inactive the Canvas always draws the stored `FlowNodeSnapshot` regardless of whether the live subtree is mounted underneath. `.persistent` only controls visibility, not whether the snapshot is shown.
 

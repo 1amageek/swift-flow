@@ -32,15 +32,17 @@ public final class LiveMapNodeStateStore {
 /// - Mount policy is ``LiveNodeMountPolicy/remountOnActivation``: MapKit's
 ///   tile pipeline does not survive an inactive cycle reliably, so each
 ///   activation gets a fresh `MKMapView`.
-/// - Snapshot policy is ``LiveNodeSnapshotPolicy/onDeactivation`` so the
-///   poster reflects the user's most recent pan/zoom. ``LiveNodeCapture``
-///   is `.custom` and reads from a weak reference into the currently
-///   mounted `MKMapView` — the closure is set once at `LiveNode` init,
-///   but the target `MKMapView` is replaced on every activation cycle.
+/// - `LiveNode` is configured with `snapshot: .disabled` and
+///   `capture: .disabled` so it does not register any capture path of its
+///   own. Instead, ``LiveMapRepresentable`` registers a deactivation
+///   capture handler directly with the `LiveNodeActivationCoordinator`
+///   from `makeUIView` / `makeNSView`. The handler captures the live
+///   `MKMapView` weakly and runs while the row is still mounted, so the
+///   coordinator's deactivation pipeline writes a fresh snapshot before
+///   the overlay fades.
 /// - The coordinator additionally pushes a one-shot bootstrap snapshot
 ///   500ms after the first activation kick so the poster is non-empty
-///   before the user hovers out (the `.onDeactivation` policy does not
-///   seed on appear).
+///   before the user hovers out for the first time.
 /// - Region persistence is read/write through the user-supplied
 ///   ``LiveMapNodeStateStore`` so pan/zoom survives remount cycles.
 /// - Tile pipeline kick: window-attach callback + non-zero bounds polling
@@ -67,8 +69,6 @@ public struct LiveMapNode<Data>: View where Data: Sendable & Hashable {
     private let stateStore: LiveMapNodeStateStore
     private let cornerRadius: CGFloat
 
-    @StateObject private var ref = LiveMapNodeRef()
-
     public init(
         node: FlowNode<Data>,
         initialCoordinate: CLLocationCoordinate2D,
@@ -85,13 +85,10 @@ public struct LiveMapNode<Data>: View where Data: Sendable & Hashable {
         LiveNode(
             node: node,
             mount: .remountOnActivation,
-            snapshot: .onDeactivation,
-            capture: .custom { [ref] in
-                ref.currentMapView?.makeLiveMapNodeSnapshot()
-            }
+            snapshot: .disabled,
+            capture: .disabled
         ) {
             LiveMapRepresentable(
-                ref: ref,
                 nodeID: node.id,
                 initialCoordinate: initialCoordinate,
                 cornerRadius: cornerRadius,
@@ -101,21 +98,6 @@ public struct LiveMapNode<Data>: View where Data: Sendable & Hashable {
             Color.clear
         }
     }
-}
-
-// MARK: - Reference Holder
-
-/// Stable per-``LiveMapNode`` handle that bridges the `LiveNode`
-/// `capture: .custom` closure (set once at init time) to the currently
-/// mounted `MKMapView` (recreated on every activation under
-/// ``LiveNodeMountPolicy/remountOnActivation``). The reference is
-/// `weak` so this object never extends the `MKMapView`'s lifetime;
-/// dismantle is the natural cleanup point.
-@MainActor
-final class LiveMapNodeRef: ObservableObject {
-    weak var currentMapView: LiveMapNodeMapView?
-
-    init() {}
 }
 
 // MARK: - MKMapView subclass
@@ -161,10 +143,15 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
     /// Closure injected by ``LiveMapRepresentable`` from
     /// `\.flowLiveNodeSnapshotWriter` so the coordinator can push a
     /// bootstrap snapshot 500ms after the activation kick. `LiveNode` is
-    /// configured with `snapshot: .onDeactivation` (no `seedOnAppear`),
-    /// so without this push the poster stays empty until the user has
-    /// hovered out at least once.
+    /// configured with `snapshot: .disabled`, so without this push the
+    /// poster stays empty until the deactivation capture has fired at
+    /// least once.
     var snapshotWriter: (@MainActor (String, FlowNodeSnapshot) -> Void)?
+
+    /// Activation coordinator used for deregistration on dismantle. Kept
+    /// `weak` so we never extend the FlowCanvas-owned coordinator's
+    /// lifetime.
+    weak var activationCoordinator: LiveNodeActivationCoordinator?
 
     /// Only flipped to `true` after a real-size `setRegion` has actually
     /// landed. Flipping it earlier would consume the activation edge on a
@@ -218,6 +205,7 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
         initialCaptureTask = nil
         hasRequestedInitialCapture = false
         wasActive = false
+        activationCoordinator?.unregisterCapture(for: nodeID)
     }
 
     private func scheduleActivationKick(for mapView: MKMapView) {
@@ -311,8 +299,8 @@ struct LiveMapRepresentable: UIViewRepresentable {
 
     @Environment(\.isFlowNodeActive) private var isActive
     @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
+    @Environment(\.liveNodeActivationCoordinator) private var activationCoordinator
 
-    let ref: LiveMapNodeRef
     let nodeID: String
     let initialCoordinate: CLLocationCoordinate2D
     let cornerRadius: CGFloat
@@ -323,27 +311,40 @@ struct LiveMapRepresentable: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> MKMapView {
-        context.coordinator.snapshotWriter = snapshotWriter
+        let coordinator = context.coordinator
+        coordinator.snapshotWriter = snapshotWriter
+        coordinator.activationCoordinator = activationCoordinator
 
         let mapView = LiveMapNodeMapView()
-        ref.currentMapView = mapView
-        mapView.delegate = context.coordinator
+        mapView.delegate = coordinator
         mapView.layer.cornerRadius = cornerRadius
         mapView.layer.masksToBounds = true
         mapView.setRegion(initialRegion, animated: false)
 
-        let coordinator = context.coordinator
         mapView.onWindowAttach = { [weak coordinator] view in
             coordinator?.kickIfReady(view)
+        }
+
+        // Register the deactivation capture handler directly with the
+        // activation coordinator. The handler captures `mapView` weakly,
+        // so it always reads from the live MKMapView instance even
+        // though `.remountOnActivation` recreates one per cycle.
+        activationCoordinator?.registerCapture(for: nodeID) { [weak mapView, weak coordinator] in
+            guard let mapView, let coordinator else { return }
+            guard let writer = coordinator.snapshotWriter else { return }
+            guard let snapshot = mapView.makeLiveMapNodeSnapshot() else { return }
+            writer(coordinator.nodeID, snapshot)
         }
 
         return mapView
     }
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
-        context.coordinator.snapshotWriter = snapshotWriter
+        let coordinator = context.coordinator
+        coordinator.snapshotWriter = snapshotWriter
+        coordinator.activationCoordinator = activationCoordinator
         mapView.layer.cornerRadius = cornerRadius
-        context.coordinator.updateActiveState(isActive, mapView: mapView)
+        coordinator.updateActiveState(isActive, mapView: mapView)
     }
 
     static func dismantleUIView(_ mapView: MKMapView, coordinator: LiveMapNodeCoordinator) {
@@ -366,8 +367,8 @@ struct LiveMapRepresentable: NSViewRepresentable {
 
     @Environment(\.isFlowNodeActive) private var isActive
     @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
+    @Environment(\.liveNodeActivationCoordinator) private var activationCoordinator
 
-    let ref: LiveMapNodeRef
     let nodeID: String
     let initialCoordinate: CLLocationCoordinate2D
     let cornerRadius: CGFloat
@@ -378,28 +379,41 @@ struct LiveMapRepresentable: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> MKMapView {
-        context.coordinator.snapshotWriter = snapshotWriter
+        let coordinator = context.coordinator
+        coordinator.snapshotWriter = snapshotWriter
+        coordinator.activationCoordinator = activationCoordinator
 
         let mapView = LiveMapNodeMapView()
-        ref.currentMapView = mapView
-        mapView.delegate = context.coordinator
+        mapView.delegate = coordinator
         mapView.wantsLayer = true
         mapView.layer?.cornerRadius = cornerRadius
         mapView.layer?.masksToBounds = true
         mapView.setRegion(initialRegion, animated: false)
 
-        let coordinator = context.coordinator
         mapView.onWindowAttach = { [weak coordinator] view in
             coordinator?.kickIfReady(view)
+        }
+
+        // Register the deactivation capture handler directly with the
+        // activation coordinator. The handler captures `mapView` weakly,
+        // so it always reads from the live MKMapView instance even
+        // though `.remountOnActivation` recreates one per cycle.
+        activationCoordinator?.registerCapture(for: nodeID) { [weak mapView, weak coordinator] in
+            guard let mapView, let coordinator else { return }
+            guard let writer = coordinator.snapshotWriter else { return }
+            guard let snapshot = mapView.makeLiveMapNodeSnapshot() else { return }
+            writer(coordinator.nodeID, snapshot)
         }
 
         return mapView
     }
 
     func updateNSView(_ mapView: MKMapView, context: Context) {
-        context.coordinator.snapshotWriter = snapshotWriter
+        let coordinator = context.coordinator
+        coordinator.snapshotWriter = snapshotWriter
+        coordinator.activationCoordinator = activationCoordinator
         mapView.layer?.cornerRadius = cornerRadius
-        context.coordinator.updateActiveState(isActive, mapView: mapView)
+        coordinator.updateActiveState(isActive, mapView: mapView)
     }
 
     static func dismantleNSView(_ mapView: MKMapView, coordinator: LiveMapNodeCoordinator) {

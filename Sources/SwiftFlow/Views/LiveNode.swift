@@ -16,20 +16,23 @@ import SwiftUI
 /// ```
 ///
 /// For native views (`WKWebView`, `MKMapView`, `AVPlayerView`) the developer
-/// owns the underlying instance through `@State` and supplies a
-/// ``LiveNodeCapture/custom(_:)`` closure that produces a snapshot:
+/// owns the underlying instance through `@State` and the wrapping
+/// representable participates in the snapshot pipeline by reading
+/// `\.liveNodeSnapshotContext` from the environment:
 ///
 /// ```swift
 /// @State private var webView = WKWebView()
 ///
-/// LiveNode(
-///     node: node,
-///     mount: .persistent,
-///     capture: .custom { await webView.makeFlowNodeSnapshot() }
-/// ) {
+/// LiveNode(node: node, mount: .persistent) {
 ///     WebRepresentable(webView: webView, url: url)
 /// }
 /// ```
+///
+/// Inside `WebRepresentable.makeUIView` / `makeNSView` the developer reads
+/// `\.liveNodeSnapshotContext` and either registers a capture handler
+/// (called during deactivation) or pushes a snapshot directly when an
+/// internal event lands (navigation finish, tile render). See
+/// ``LiveNodeSnapshotContext`` for details.
 public struct LiveNode<Content: View, Placeholder: View>: View {
 
     private let explicitNode: LiveNodeDescriptor?
@@ -42,17 +45,11 @@ public struct LiveNode<Content: View, Placeholder: View>: View {
     public init<Data>(
         node: FlowNode<Data>,
         mount: LiveNodeMountPolicy = .onActivation,
-        snapshot: LiveNodeSnapshotPolicy = .automatic,
-        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping () -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) where Data: Sendable & Hashable {
         self.explicitNode = LiveNodeDescriptor(node: node)
-        self.configuration = LiveNodeConfiguration(
-            mountPolicy: mount,
-            snapshotPolicy: snapshot,
-            capture: capture
-        )
+        self.configuration = LiveNodeConfiguration(mountPolicy: mount)
         self.content = { _ in content() }
         self.placeholder = placeholder
     }
@@ -60,17 +57,11 @@ public struct LiveNode<Content: View, Placeholder: View>: View {
     public init<Data>(
         node: FlowNode<Data>,
         mount: LiveNodeMountPolicy = .onActivation,
-        snapshot: LiveNodeSnapshotPolicy = .automatic,
-        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) where Data: Sendable & Hashable {
         self.explicitNode = LiveNodeDescriptor(node: node)
-        self.configuration = LiveNodeConfiguration(
-            mountPolicy: mount,
-            snapshotPolicy: snapshot,
-            capture: capture
-        )
+        self.configuration = LiveNodeConfiguration(mountPolicy: mount)
         self.content = content
         self.placeholder = placeholder
     }
@@ -110,15 +101,11 @@ extension LiveNode where Placeholder == FlowDefaultPlaceholder {
     public init<Data>(
         node: FlowNode<Data>,
         mount: LiveNodeMountPolicy = .onActivation,
-        snapshot: LiveNodeSnapshotPolicy = .automatic,
-        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping () -> Content
     ) where Data: Sendable & Hashable {
         self.init(
             node: node,
             mount: mount,
-            snapshot: snapshot,
-            capture: capture,
             content: content,
             placeholder: { FlowDefaultPlaceholder() }
         )
@@ -127,19 +114,29 @@ extension LiveNode where Placeholder == FlowDefaultPlaceholder {
     public init<Data>(
         node: FlowNode<Data>,
         mount: LiveNodeMountPolicy = .onActivation,
-        snapshot: LiveNodeSnapshotPolicy = .automatic,
-        capture: LiveNodeCapture = .auto,
         @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content
     ) where Data: Sendable & Hashable {
         self.init(
             node: node,
             mount: mount,
-            snapshot: snapshot,
-            capture: capture,
             content: content,
             placeholder: { FlowDefaultPlaceholder() }
         )
     }
+}
+
+// MARK: - Native Capture Registry
+
+/// Per-`LiveNode` slot for the native capture handler installed by a
+/// descendant representable through ``LiveNodeSnapshotContext``.
+///
+/// Reference type so registering / clearing the handler from within
+/// `makeUIView` / `dismantleUIView` does not invalidate the surrounding
+/// SwiftUI body — the registry is held by `@State` and only its single
+/// property is mutated.
+@MainActor
+final class LiveNodeNativeCaptureRegistry {
+    var handler: (@MainActor () async -> FlowNodeSnapshot?)?
 }
 
 // MARK: - Core
@@ -158,6 +155,7 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
     @Environment(\.liveNodeActivationCoordinator) private var coordinator
 
+    @State private var nativeCapture = LiveNodeNativeCaptureRegistry()
     @State private var remountGeneration: Int = 0
     @State private var previousActiveState: Bool = false
 
@@ -178,6 +176,7 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
                 key: LiveNodeMountPolicyKey.self,
                 value: [environment.id: configuration.mountPolicy]
             )
+            .environment(\.liveNodeSnapshotContext, makeSnapshotContext())
             .onAppear {
                 previousActiveState = isActive
             }
@@ -192,8 +191,7 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
         case .rasterize:
             RasterizedNodeBody(
                 snapshot: environment.snapshot,
-                placeholder: placeholder,
-                seedSnapshotIfNeeded: seedSnapshotIfNeeded
+                placeholder: placeholder
             )
 
         case .live:
@@ -203,19 +201,11 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
                 remountGeneration: remountGeneration,
                 content: { content(contentContext) }
             )
-            .modifier(
-                LiveNodeCaptureLifecycleModifier(
-                    nodeID: environment.id,
-                    nodeSize: environment.size,
-                    snapshotPolicy: configuration.snapshotPolicy,
-                    isActive: isActive,
-                    registerDeactivationCapture: registerDeactivationCapture,
-                    unregisterDeactivationCapture: unregisterDeactivationCapture,
-                    captureNow: captureNow
-                )
-            )
-            .onAppear {
-                seedSnapshotIfNeeded()
+            .task(id: environment.id) {
+                registerDeactivationCapture()
+            }
+            .onDisappear {
+                unregisterDeactivationCapture()
             }
         }
     }
@@ -230,28 +220,10 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
         if configuration.mountPolicy == .remountOnActivation {
             remountGeneration += 1
         }
-
-        if configuration.snapshotPolicy.triggersOnActivation {
-            Task { @MainActor in
-                await captureNow()
-            }
-        }
-    }
-
-    @MainActor
-    private func seedSnapshotIfNeeded() {
-        guard environment.snapshot == nil else { return }
-        guard configuration.snapshotPolicy.seedsOnAppear else { return }
-
-        Task { @MainActor in
-            await captureNow()
-        }
     }
 
     @MainActor
     private func registerDeactivationCapture() {
-        guard configuration.snapshotPolicy.triggersOnDeactivation else { return }
-
         coordinator?.registerCapture(for: environment.id) {
             await captureNow()
         }
@@ -265,19 +237,16 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     @MainActor
     private func captureNow() async {
         guard let snapshotWriter else { return }
+        guard let snapshot = await produceSnapshot() else { return }
+        snapshotWriter(environment.id, snapshot)
+    }
 
-        switch configuration.capture {
-        case .auto:
-            guard let snapshot = captureWithImageRenderer() else { return }
-            snapshotWriter(environment.id, snapshot)
-
-        case let .custom(handler):
-            guard let snapshot = await handler() else { return }
-            snapshotWriter(environment.id, snapshot)
-
-        case .disabled:
-            return
+    @MainActor
+    private func produceSnapshot() async -> FlowNodeSnapshot? {
+        if let nativeHandler = nativeCapture.handler {
+            return await nativeHandler()
         }
+        return captureWithImageRenderer()
     }
 
     @MainActor
@@ -301,6 +270,30 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     private var captureScale: CGFloat {
         min(max(displayScale * 2, 2), 4)
     }
+
+    @MainActor
+    private func makeSnapshotContext() -> LiveNodeSnapshotContext? {
+        guard let snapshotWriter else { return nil }
+        let nodeID = environment.id
+        let registry = nativeCapture
+        return LiveNodeSnapshotContext(
+            nodeID: nodeID,
+            write: { snapshot in
+                snapshotWriter(nodeID, snapshot)
+            },
+            registerCapture: { handler in
+                registry.handler = handler
+            },
+            unregisterCapture: {
+                registry.handler = nil
+            },
+            requestCapture: {
+                guard let handler = registry.handler else { return }
+                guard let snapshot = await handler() else { return }
+                snapshotWriter(nodeID, snapshot)
+            }
+        )
+    }
 }
 
 // MARK: - Rasterized Body
@@ -308,7 +301,6 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
 private struct RasterizedNodeBody<Placeholder: View>: View {
     let snapshot: FlowNodeSnapshot?
     let placeholder: () -> Placeholder
-    let seedSnapshotIfNeeded: @MainActor () -> Void
 
     var body: some View {
         Group {
@@ -316,9 +308,6 @@ private struct RasterizedNodeBody<Placeholder: View>: View {
                 SnapshotImage(snapshot: snapshot)
             } else {
                 placeholder()
-                    .onAppear {
-                        seedSnapshotIfNeeded()
-                    }
             }
         }
     }
@@ -374,70 +363,6 @@ private struct SnapshotImage: View {
         Image(snapshot.cgImage, scale: snapshot.scale, label: Text(verbatim: ""))
             .resizable()
             .interpolation(.high)
-    }
-}
-
-// MARK: - Capture Lifecycle
-
-private struct LiveNodeCaptureLifecycleModifier: ViewModifier {
-    let nodeID: String
-    let nodeSize: CGSize
-    let snapshotPolicy: LiveNodeSnapshotPolicy
-    let isActive: Bool
-
-    let registerDeactivationCapture: @MainActor () -> Void
-    let unregisterDeactivationCapture: @MainActor () -> Void
-    let captureNow: @MainActor () async -> Void
-
-    func body(content: Content) -> some View {
-        content
-            .task(id: registrationIdentity) {
-                registerDeactivationCapture()
-            }
-            .onDisappear {
-                unregisterDeactivationCapture()
-            }
-            .task(id: periodicIdentity) {
-                await runPeriodicCaptureLoopIfNeeded()
-            }
-    }
-
-    private var registrationIdentity: String {
-        [
-            nodeID,
-            "\(Int(nodeSize.width))x\(Int(nodeSize.height))",
-            snapshotPolicy.registrationIdentity
-        ].joined(separator: "|")
-    }
-
-    private var periodicIdentity: String {
-        [
-            nodeID,
-            "\(Int(nodeSize.width))x\(Int(nodeSize.height))",
-            snapshotPolicy.registrationIdentity,
-            "active=\(isActive)"
-        ].joined(separator: "|")
-    }
-
-    private func runPeriodicCaptureLoopIfNeeded() async {
-        guard isActive else { return }
-        guard let interval = snapshotPolicy.periodicInterval else { return }
-
-        let nanos = UInt64(max(interval, 0.05) * 1_000_000_000)
-
-        while !Task.isCancelled {
-            do {
-                try await Task.sleep(nanoseconds: nanos)
-            } catch {
-                return
-            }
-
-            if Task.isCancelled {
-                return
-            }
-
-            await captureNow()
-        }
     }
 }
 

@@ -1278,10 +1278,9 @@ private extension LivePreviewPlatformImage {
 
 @MainActor
 private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
-    var onSnapshotReady: (FlowNodeSnapshot) -> Void
+    var snapshotContext: LiveNodeSnapshotContext?
 
-    init(onSnapshotReady: @escaping (FlowNodeSnapshot) -> Void) {
-        self.onSnapshotReady = onSnapshotReady
+    override init() {
         super.init()
     }
 
@@ -1293,7 +1292,7 @@ private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
                 return
             }
             guard let snapshot = await webView.makeFlowNodeSnapshot() else { return }
-            self?.onSnapshotReady(snapshot)
+            self?.snapshotContext?.write(snapshot)
         }
     }
 }
@@ -1346,14 +1345,18 @@ private struct WebNodeRepresentable: UIViewRepresentable {
     let webView: LiveWebView
     let url: URL
     let cornerRadius: CGFloat
-    let onSnapshotReady: (FlowNodeSnapshot) -> Void
+
+    @Environment(\.liveNodeSnapshotContext) private var snapshotContext
 
     func makeCoordinator() -> WebNodeCoordinator {
-        WebNodeCoordinator(onSnapshotReady: onSnapshotReady)
+        WebNodeCoordinator()
     }
 
     func makeUIView(context: Context) -> WKWebView {
-        webView.navigationDelegate = context.coordinator
+        let coordinator = context.coordinator
+        coordinator.snapshotContext = snapshotContext
+
+        webView.navigationDelegate = coordinator
         webView.layer.cornerRadius = cornerRadius
         webView.layer.masksToBounds = true
         webView.scrollView.layer.cornerRadius = cornerRadius
@@ -1363,16 +1366,26 @@ private struct WebNodeRepresentable: UIViewRepresentable {
             webView.load(URLRequest(url: url))
         }
 
+        // Register the deactivation capture handler with the surrounding
+        // LiveNode. The handler captures `webView` weakly so the
+        // representable does not extend its lifetime past the View's.
+        snapshotContext?.registerCapture { [weak webView] in
+            guard let webView else { return nil }
+            return await webView.makeFlowNodeSnapshot()
+        }
+
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.onSnapshotReady = onSnapshotReady
+        context.coordinator.snapshotContext = snapshotContext
         webView.layer.cornerRadius = cornerRadius
         webView.scrollView.layer.cornerRadius = cornerRadius
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: WebNodeCoordinator) {
+        coordinator.snapshotContext?.unregisterCapture()
+        coordinator.snapshotContext = nil
         webView.navigationDelegate = nil
     }
 }
@@ -1381,14 +1394,18 @@ private struct WebNodeRepresentable: NSViewRepresentable {
     let webView: LiveWebView
     let url: URL
     let cornerRadius: CGFloat
-    let onSnapshotReady: (FlowNodeSnapshot) -> Void
+
+    @Environment(\.liveNodeSnapshotContext) private var snapshotContext
 
     func makeCoordinator() -> WebNodeCoordinator {
-        WebNodeCoordinator(onSnapshotReady: onSnapshotReady)
+        WebNodeCoordinator()
     }
 
     func makeNSView(context: Context) -> WKWebView {
-        webView.navigationDelegate = context.coordinator
+        let coordinator = context.coordinator
+        coordinator.snapshotContext = snapshotContext
+
+        webView.navigationDelegate = coordinator
         webView.wantsLayer = true
         webView.layer?.cornerRadius = cornerRadius
         webView.layer?.masksToBounds = true
@@ -1397,15 +1414,25 @@ private struct WebNodeRepresentable: NSViewRepresentable {
             webView.load(URLRequest(url: url))
         }
 
+        // Register the deactivation capture handler with the surrounding
+        // LiveNode. The handler captures `webView` weakly so the
+        // representable does not extend its lifetime past the View's.
+        snapshotContext?.registerCapture { [weak webView] in
+            guard let webView else { return nil }
+            return await webView.makeFlowNodeSnapshot()
+        }
+
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        context.coordinator.onSnapshotReady = onSnapshotReady
+        context.coordinator.snapshotContext = snapshotContext
         webView.layer?.cornerRadius = cornerRadius
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: WebNodeCoordinator) {
+        coordinator.snapshotContext?.unregisterCapture()
+        coordinator.snapshotContext = nil
         webView.navigationDelegate = nil
     }
 }
@@ -1413,36 +1440,32 @@ private struct WebNodeRepresentable: NSViewRepresentable {
 
 // MARK: - Web node wrapper
 
-/// View that owns a stable `WKWebView` instance via `@StateObject`. The
-/// same instance is passed both to ``WebNodeRepresentable`` (for live
-/// rendering) and to the ``LiveNode/init(node:mount:snapshot:capture:content:placeholder:)``
-/// `capture: .custom` closure (for snapshot generation).
+/// View that owns a stable `WKWebView` instance via `@State`. The
+/// representable reads `\.liveNodeSnapshotContext` from the surrounding
+/// `LiveNode` and uses it for both deactivation capture registration and
+/// post-navigation snapshot pushes — the developer never has to wire a
+/// closure through `LiveNode`'s initializer.
 private struct WebNodeView: View {
 
     let node: FlowNode<LivePreviewData>
     let url: URL
     let title: String
     let cornerRadius: CGFloat
-    let store: FlowStore<LivePreviewData>
 
-    @StateObject private var ref = WebNodeRef()
+    @State private var webView: LiveWebView = {
+        let v = LiveWebView()
+        #if os(macOS)
+        v.disableWindowOcclusionDetection()
+        #endif
+        return v
+    }()
 
     var body: some View {
-        LiveNode(
-            node: node,
-            mount: .persistent,
-            snapshot: .onDeactivation,
-            capture: .custom { [ref] in
-                await ref.webView.makeFlowNodeSnapshot()
-            }
-        ) {
+        LiveNode(node: node, mount: .persistent) {
             WebNodeRepresentable(
-                webView: ref.webView,
+                webView: webView,
                 url: url,
-                cornerRadius: cornerRadius,
-                onSnapshotReady: { [store, nodeID = node.id] snapshot in
-                    store.setNodeSnapshot(snapshot, for: nodeID)
-                }
+                cornerRadius: cornerRadius
             )
         } placeholder: {
             VStack(spacing: 8) {
@@ -1454,19 +1477,6 @@ private struct WebNodeView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.background)
         }
-    }
-}
-
-@MainActor
-private final class WebNodeRef: ObservableObject {
-    let webView: LiveWebView
-
-    init() {
-        let v = LiveWebView()
-        #if os(macOS)
-        v.disableWindowOcclusionDetection()
-        #endif
-        self.webView = v
     }
 }
 
@@ -1540,7 +1550,7 @@ private struct LiveFlowPreview: View {
                 Text("Hover or select a node to switch from snapshot to its live view.")
                 Text("Web / map headers use FlowNodeDragHandle so node-move works above scroll-consuming bodies.")
                     .foregroundStyle(.secondary)
-                Text("Web nodes mount as .persistent with capture: .custom { webView snapshot }; map nodes use .remountOnActivation.")
+                Text("Web nodes mount as .persistent and push snapshots via \\.liveNodeSnapshotContext; map nodes use .remountOnActivation.")
                     .foregroundStyle(.secondary)
                 Text("Select the orange node and drag a corner handle to resize.")
                     .foregroundStyle(.secondary)
@@ -1599,8 +1609,7 @@ private struct LivePreviewNodeBody: View {
                 node: node,
                 url: url,
                 title: title,
-                cornerRadius: cornerRadius,
-                store: store
+                cornerRadius: cornerRadius
             )
             .overlay(alignment: .top) {
                 headerOverlay

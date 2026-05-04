@@ -227,21 +227,22 @@ FlowCanvas(store: store) { node, ctx in
 }
 ```
 
-The library seeds a snapshot on first mount and re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path always has something to draw and colors / fonts stay consistent across the active ↔ inactive transition. `LiveNode` sizes itself to `node.size`, so the caller does **not** need to apply a `.frame(...)` matching the node — just compose any handle padding, clipping, shadows, or overlays around it.
+For SwiftUI-only content the library re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path stays consistent with the live phase across the active ↔ inactive transition. `LiveNode` sizes itself to `node.size`, so the caller does **not** need to apply a `.frame(...)` matching the node — just compose any handle padding, clipping, shadows, or overlays around it.
 
 `LiveNode` is a phase dispatcher — its only sizing decision is matching `node.size`. Visual treatment (corner radius, the handle-inset padding that keeps handles on the border from being clipped, background, overlays, etc.) is composed with ordinary SwiftUI modifiers around `LiveNode`. Handle drawing is likewise the caller's responsibility: use `FlowNodeHandles(node:context:)` for the library default look, or compose `FlowHandle` views directly for fully custom handles.
 
 ### Native Views (WKWebView / MKMapView / AVPlayerView)
 
-`ImageRenderer` cannot rasterize `UIViewRepresentable` / `NSViewRepresentable` content — `WKWebView`, `MKMapView`, `AVPlayerView`, and similar views render as opaque background. SwiftFlow does not bundle wrappers for individual native frameworks; instead, `LiveNode` exposes three init arguments that let the developer compose a working setup with framework-native snapshot APIs:
+`ImageRenderer` cannot rasterize `UIViewRepresentable` / `NSViewRepresentable` content — `WKWebView`, `MKMapView`, `AVPlayerView`, and similar views render as opaque background. SwiftFlow does not bundle wrappers for individual native frameworks; instead, the wrapping representable participates in the snapshot pipeline by reading `\.liveNodeSnapshotContext` from the environment that `LiveNode` publishes for its descendants:
 
-| Argument | Type | Purpose |
-|---|---|---|
-| `mount:` | ``LiveNodeMountPolicy`` | When the live SwiftUI body is mounted in the overlay |
-| `snapshot:` | ``LiveNodeSnapshotPolicy`` | When `LiveNode` triggers a capture |
-| `capture:` | ``LiveNodeCapture`` | How a capture is produced — `.auto` uses `ImageRenderer`, `.custom { ... }` runs your async closure, `.disabled` skips capture |
+| Method on ``LiveNodeSnapshotContext`` | Purpose |
+|---|---|
+| `write(_:)` | Push a snapshot directly — call after a navigation completes (`WKWebView`), a tile pass lands (`MKMapView`), or any other moment the app already has a fresh frame in hand |
+| `registerCapture(_:)` | Install an async capture handler that `LiveNode` invokes during the deactivation pipeline — the handler typically reads from the live native view weakly and produces a `FlowNodeSnapshot` |
+| `unregisterCapture()` | Clear the handler — call from `dismantleUIView` / `dismantleNSView` so a remount cycle does not leave a stale handler bound to a dead view |
+| `requestCapture()` | Drive a capture pass on demand, e.g. to seed the poster shortly after the view first attaches |
 
-The recommended pattern is to own the native view in `@State` and pass the same instance to both the `Representable` and the `capture: .custom` closure. For `.persistent` mount, the instance is stable across activation toggles, so a plain `@State` reference works without any wrapper holder:
+The recommended pattern is to own the native view in `@State` and let the representable wire the snapshot context in `makeUIView` / `makeNSView`:
 
 ```swift
 private struct WebNode: View {
@@ -251,23 +252,39 @@ private struct WebNode: View {
     @State private var webView = WKWebView()
 
     var body: some View {
-        LiveNode(
-            node: node,
-            mount: .persistent,
-            snapshot: .onDeactivation,
-            capture: .custom {
-                await webView.makeFlowNodeSnapshot()
-            }
-        ) {
+        LiveNode(node: node, mount: .persistent) {
             WebRepresentable(webView: webView, url: url)
         } placeholder: {
             ProgressView()
         }
     }
 }
+
+private struct WebRepresentable: UIViewRepresentable {
+    let webView: WKWebView
+    let url: URL
+
+    @Environment(\.liveNodeSnapshotContext) private var snapshot
+
+    func makeUIView(context: Context) -> WKWebView {
+        if webView.url == nil { webView.load(URLRequest(url: url)) }
+        snapshot?.registerCapture { [weak webView] in
+            await webView?.makeFlowNodeSnapshot()
+        }
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {}
+
+    static func dismantleUIView(_ webView: WKWebView, coordinator: ()) {
+        // The View itself can't reach `snapshot` from here; clearing the
+        // handler from inside the navigation delegate (which holds the
+        // context) is the typical pattern.
+    }
+}
 ```
 
-If the app needs to push a fresh snapshot at moments other than deactivation — e.g. on `WKNavigationDelegate.didFinish`, `MKMapViewDelegate.regionDidChangeAnimated`, or `AVPlayerItem.didPlayToEndTimeNotification` — call `store.setNodeSnapshot(_, for: nodeID)` directly from the delegate. That path is independent of `LiveNode`'s deactivation-triggered captures.
+For events that produce a fresh frame outside the deactivation pipeline — `WKNavigationDelegate.didFinish`, `MKMapViewDelegate.mapViewDidFinishRenderingMap`, `AVPlayerItem.didPlayToEndTimeNotification` — call `snapshot.write(_:)` from the delegate. That path is independent of the deactivation-triggered capture handler and lets the poster reflect the latest content immediately.
 
 Snapshot helpers are framework-specific. For `WKWebView`:
 
@@ -284,18 +301,7 @@ extension WKWebView {
 
 `MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). `MKMapView` additionally needs `mount: .remountOnActivation` rather than `.persistent` — see [Mount Policy](#mount-policy) for why.
 
-### Snapshot Policy
-
-`LiveNode` separates **when** to capture (``LiveNodeSnapshotPolicy``) from **how** to capture (``LiveNodeCapture``).
-
-| `LiveNodeSnapshotPolicy` | Behavior |
-|---|---|
-| `.automatic` *(default)* | Seed once on first appear, re-capture on each deactivation |
-| `.onDeactivation` | Capture only on deactivation (no seed) — pair with `mount: .persistent` so the live view has time to render before the user deactivates |
-| `.disabled` | Never capture — the rasterize path falls back to the placeholder until the app pushes a snapshot via `FlowStore.setNodeSnapshot` |
-| `.periodic(TimeInterval)` | Capture at the given interval while active + once on deactivation |
-
-Captures all route through the deactivation coordinator: the live overlay stays mounted at opacity 1 until the capture returns, so the first frame the user sees after deactivation is the **new** snapshot, not the previous one.
+When the live content is pure SwiftUI, the representable simply does not register a capture handler. `LiveNode` falls back to `ImageRenderer` to produce the deactivation snapshot.
 
 ### Mount Policy
 

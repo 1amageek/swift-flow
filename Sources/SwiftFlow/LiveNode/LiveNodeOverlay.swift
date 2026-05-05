@@ -313,25 +313,24 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
 
     /// Mount decision depends on the per-node mount policy:
     ///
-    /// - `.onActivation` (default): mount while active OR while the
-    ///   node still has no snapshot — the latter lets native
-    ///   representables load their content and seed the snapshot,
-    ///   after which the row unmounts and the Canvas draws from the
-    ///   snapshot instead.
-    /// - `.persistent`: stay mounted as long as the node is in
-    ///   viewport. The activation predicate then only toggles
-    ///   `shouldShow` (opacity / hit-testing). Required for native
-    ///   representables backed by a separate process — their
-    ///   `removeFromSuperview` propagates `viewDidMoveToWindow(nil)`
-    ///   into the remote-layer subtree and stalls the
-    ///   CARemoteLayerClient / CAMetalLayer pipeline; keeping the
-    ///   row mounted avoids that detach entirely.
-    ///
-    /// While the user is panning or zooming the canvas the live
-    /// subtree is unmounted unconditionally — the Canvas poster (the
-    /// stored snapshot, or a placeholder) takes over for the duration
-    /// of the gesture so native representables (`MKMapView`,
-    /// `WKWebView`) are not subjected to live re-layout each frame.
+    /// - `.onActivation` (default) and `.remountOnActivation`: mount
+    ///   while active OR while the node still has no snapshot — the
+    ///   latter lets native representables load their content and seed
+    ///   the snapshot, after which the row unmounts and the Canvas
+    ///   draws from the snapshot instead. Both policies also unmount
+    ///   while the user is panning or zooming so the Canvas poster
+    ///   takes over for the duration of the gesture; this avoids
+    ///   per-frame SwiftUI re-layout for the live subtree.
+    /// - `.persistent`: stay mounted regardless of activation OR
+    ///   viewport interaction. Required for native representables
+    ///   backed by a separate process — their `removeFromSuperview`
+    ///   propagates `viewDidMoveToWindow(nil)` into the remote-layer
+    ///   subtree and stalls the CARemoteLayerClient / CAMetalLayer
+    ///   pipeline; keeping the row mounted avoids that detach entirely.
+    ///   While the user is panning or zooming the row's `shouldShow`
+    ///   and `isHittable` already drop to `false` from the owning
+    ///   overlay, so Canvas takes over drawing/hit-testing without
+    ///   tearing down the underlying native view.
     private var shouldMount: Bool {
         // Plain (non-LiveNode) rows never mount: the Canvas symbol pass
         // already draws them, and the warmup branch below would otherwise
@@ -341,15 +340,22 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
             return false
         }
 
-        if isViewportInteracting {
-            return false
-        }
-
         switch mountPolicy {
         case .onActivation, .remountOnActivation:
+            // Unmount during pan/zoom so the live subtree is not subjected
+            // to per-frame re-layout — the Canvas poster covers the
+            // gesture window.
+            if isViewportInteracting {
+                return false
+            }
             return isRenderedActive || renderContext.snapshot == nil
 
         case .persistent:
+            // The whole point of `.persistent` is to never detach. The
+            // body's opacity / hit-testing already collapse during
+            // viewport interaction (via shouldShow / isHittable), so
+            // Canvas owns the gesture window without disturbing the
+            // underlying CARemoteLayer pipeline.
             return true
         }
     }

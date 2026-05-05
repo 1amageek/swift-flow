@@ -351,9 +351,9 @@ struct WebViewRepresentable: UIViewRepresentable {
 
 ### Node Drag and Hit Testing
 
-Node drag is always driven by the Canvas's own gesture — multi-selection moves, zoom normalization, and undo registration all live on the Canvas side. What changes between nodes is whether drag events ever *reach* the Canvas.
+Node drag is single-sourced through `FlowStore`'s session API — `beginNodeDrag(_:)` / `updateNodeDrag(translation:)` / `endNodeDrag()`. `FlowCanvas.primaryDragGesture` and the `flowDragHandle(for:in:)` modifier both call into it, so multi-selection moves, zoom normalization, and undo registration behave identically regardless of where the drag originated. What changes between nodes is whether drag events ever *reach* one of those drag sites.
 
-- **Plain (non-LiveNode) rows.** The overlay row is kept at `opacity = 0` with hit testing disabled, so pointer events pass straight through to the Canvas. No extra work is required.
+- **Plain (non-LiveNode) rows.** The overlay row is kept hit-test transparent until a snapshot is captured, so pointer events pass straight through to the Canvas. No extra work is required.
 - **`LiveNode` with non-interactive content** (e.g. a `TimelineView` driving an animation). The content does not consume drags, but the active overlay row is still hit-testable so other gestures could route to it. Mark the live view as pass-through so drags reach the Canvas:
 
   ```swift
@@ -365,23 +365,25 @@ Node drag is always driven by the Canvas's own gesture — multi-selection moves
   .allowsHitTesting(false)
   ```
 
-- **`LiveNode` with drag-consuming content** (`WKWebView`, `MKMapView`, `AVPlayerView`, or any view containing a `ScrollView` / pan gesture). The live overlay row stays hit-test enabled so the inner view keeps its own scroll / pan / tap. To make the node draggable, wrap a dedicated grip — typically a header bar — in `FlowNodeDragHandle` so its area becomes hit-test transparent and the Canvas's `primaryDragGesture` underneath captures the drag:
+- **`LiveNode` with drag-consuming content** (`WKWebView`, `MKMapView`, `AVPlayerView`, or any view containing a `ScrollView` / pan gesture). Drags landing inside the live row are eaten by the inner view and never reach the Canvas, so a Canvas-level pass-through trick will not work. Attach `flowDragHandle(for:in:)` to a dedicated grip — typically a header bar overlaid on top of the live content — and that view dispatches its drag straight into `FlowStore`:
 
   ```swift
   LiveNode(node: node, mount: .persistent) {
-      VStack(spacing: 0) {
-          FlowNodeDragHandle {
-              Text(node.data.title)
-                  .frame(maxWidth: .infinity, alignment: .leading)
-                  .padding(6)
-                  .background(.thinMaterial)
-          }
-          WebNodeRepresentable(webView: webView, url: url)
-      }
+      WebNodeRepresentable(webView: webView, url: url)
+  }
+  .overlay(alignment: .top) {
+      Text(node.data.title)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(6)
+          .background(.thinMaterial)
+          .contentShape(Rectangle())
+          .flowDragHandle(for: node, in: store)
   }
   ```
 
-  `FlowNodeDragHandle` does **not** install its own gesture — it just marks `content` with `.allowsHitTesting(false)` so the Canvas's `primaryDragGesture` underneath fires. The drag therefore goes through the same code path as a plain `FlowNode` drag, with one `FlowStore.moveNode` call and one undo entry. While the user is dragging, the live overlay unmounts and the Canvas keeps drawing the rasterized snapshot — so dragging a `WKWebView` / `MKMapView` is as smooth as dragging a plain card.
+  The drag zone (the header) and the moved node (`node`) are decoupled — the header drags the `LiveNode` underneath without sharing geometry with it, and the `WKWebView` / `MKMapView` body keeps its own scroll / pan / tap handling. Because the modifier funnels through the same `FlowStore` session API as the Canvas's own gesture, multi-selection moves and undo behave identically.
+
+  For the legacy "open a hole and let the Canvas drag through" pattern, `FlowNodeDragHandle { ... }` is still available — it renders `content` with `.allowsHitTesting(false)` so the Canvas's `primaryDragGesture` underneath fires. Use it when the LiveNode body composes a header above the live view inline (rather than as an `.overlay`).
 
 ## Custom Edge Views
 
@@ -550,6 +552,18 @@ store.updateNode("node-1") { node in   // update any node property in-place
     node.data.badge = "New"
 }
 store.updateNodeSize("node-1", size: size)  // resize node
+```
+
+### Node Drag Session
+
+`FlowCanvas.primaryDragGesture` and the `flowDragHandle(for:in:)` modifier both dispatch through this API, so any drag site you build yourself can join the same code path — multi-selection expansion, zoom-normalized translation, and a single multi-node undo entry are all handled centrally.
+
+```swift
+store.beginNodeDrag("node-1")               // capture start positions (expands to selection if applicable)
+store.isNodeDragging                        // true while a session is active
+store.updateNodeDrag(translation: t)        // screen-space translation; zoom is applied internally
+store.endNodeDrag()                         // commit & register a single undo entry
+store.cancelNodeDrag()                      // drop the session without registering undo
 ```
 
 ### Edge Operations

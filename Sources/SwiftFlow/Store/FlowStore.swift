@@ -38,6 +38,14 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var connectionDraft: ConnectionDraft?
     var selectionRect: SelectionRect?
 
+    /// Active node-drag session, if any. Captured at begin so end can
+    /// register a single multi-node undo entry. Driven by either
+    /// `FlowCanvas`'s primary drag gesture or an external drag site
+    /// using ``View/flowDragHandle(for:in:)``. Both routes go through
+    /// ``beginNodeDrag(_:)`` / ``updateNodeDrag(translation:)`` /
+    /// ``endNodeDrag()`` so the dispatch logic is single-sourced.
+    private var nodeDragSession: NodeDragSession?
+
     // MARK: - Animation State
 
     private var viewportAnimations: (x: PropertyAnimation?, y: PropertyAnimation?, zoom: PropertyAnimation?) = (nil, nil, nil)
@@ -213,6 +221,70 @@ public final class FlowStore<Data: Sendable & Hashable> {
             }
             store.registerMoveUndo(from: to, to: from)
         }
+    }
+
+    // MARK: - Node Drag Session
+
+    /// True while any drag site is moving nodes through the shared
+    /// session API. Read by `FlowCanvas` to gate live-row unmounting and
+    /// frame redraw, and by the live overlay so external drag sites
+    /// (e.g. ``View/flowDragHandle(for:in:)``) get the same smoothness
+    /// as a Canvas-level drag.
+    public var isNodeDragging: Bool { nodeDragSession != nil }
+
+    /// Begin a node-move session targeting `nodeID`. Honors the current
+    /// multi-selection: if `nodeID` is part of the selection and there
+    /// are other selected nodes, all draggable selected nodes are moved
+    /// together. Idempotent — overwrites any leaked prior session so a
+    /// view that disappeared mid-drag can't poison the next drag.
+    public func beginNodeDrag(_ nodeID: String) {
+        guard let node = nodeLookup[nodeID], node.isDraggable else {
+            nodeDragSession = nil
+            return
+        }
+        var startPositions: [String: CGPoint] = [:]
+        if node.isSelected, selectedNodeIDs.count > 1 {
+            for id in selectedNodeIDs {
+                if let n = nodeLookup[id], n.isDraggable {
+                    startPositions[id] = n.position
+                }
+            }
+        } else {
+            startPositions[nodeID] = node.position
+        }
+        nodeDragSession = NodeDragSession(startPositions: startPositions)
+    }
+
+    /// Update the active session with a screen-space translation. The
+    /// caller passes the gesture's `value.translation` directly; viewport
+    /// zoom is applied internally so the same translation produces the
+    /// same canvas-space delta regardless of zoom level.
+    public func updateNodeDrag(translation: CGSize) {
+        guard let session = nodeDragSession else { return }
+        let zoom = viewport.zoom
+        let dx = translation.width / zoom
+        let dy = translation.height / zoom
+        for (nodeID, start) in session.startPositions {
+            moveNode(nodeID, to: CGPoint(
+                x: start.x + dx,
+                y: start.y + dy
+            ))
+        }
+    }
+
+    /// Finalize the active session: registers a single multi-node undo
+    /// entry via ``completeMoveNodes(from:)`` and clears the session.
+    public func endNodeDrag() {
+        guard let session = nodeDragSession else { return }
+        completeMoveNodes(from: session.startPositions)
+        nodeDragSession = nil
+    }
+
+    /// Drop the active session without registering undo. Intended for
+    /// out-of-band cancellation (e.g. drag interrupted by a modal) — the
+    /// gesture's normal end path should call ``endNodeDrag()`` instead.
+    public func cancelNodeDrag() {
+        nodeDragSession = nil
     }
 
     // MARK: - Resize Completion (Undo)
@@ -1269,4 +1341,13 @@ extension FlowStore where Data: Codable {
         rebuildConnectionLookup()
         undoManager?.removeAllActions()
     }
+}
+
+// MARK: - NodeDragSession
+
+/// Snapshot of node positions captured at the moment a node-move drag
+/// began. Held by `FlowStore` for the lifetime of the drag and consumed
+/// by `endNodeDrag()` to register a single multi-node undo entry.
+struct NodeDragSession: Sendable {
+    let startPositions: [String: CGPoint]
 }

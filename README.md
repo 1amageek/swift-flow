@@ -365,10 +365,10 @@ Node drag is always driven by the Canvas's own gesture — multi-selection moves
   .allowsHitTesting(false)
   ```
 
-- **`LiveNode` with drag-consuming content** (`WKWebView`, `MKMapView`, `AVPlayerView`, or any view containing a `ScrollView` / pan gesture). The inner view swallows drags while active and the Canvas gesture never fires. Wrap a dedicated grip region — typically a title bar — in `FlowNodeDragHandle` so drags on that region fall through to the Canvas instead:
+- **`LiveNode` with drag-consuming content** (`WKWebView`, `MKMapView`, `AVPlayerView`, or any view containing a `ScrollView` / pan gesture). The live overlay row stays hit-test enabled so the inner view keeps its own scroll / pan / tap. To make the node draggable, wrap a dedicated grip — typically a header bar — in `FlowNodeDragHandle` so its area becomes hit-test transparent and the Canvas's `primaryDragGesture` underneath captures the drag:
 
   ```swift
-  FlowCanvas(store: store) { node, ctx in
+  LiveNode(node: node, mount: .persistent) {
       VStack(spacing: 0) {
           FlowNodeDragHandle {
               Text(node.data.title)
@@ -376,16 +376,12 @@ Node drag is always driven by the Canvas's own gesture — multi-selection moves
                   .padding(6)
                   .background(.thinMaterial)
           }
-          LiveNode(node: node) {
-              WebNodeRepresentable(url: node.data.url)
-          }
+          WebNodeRepresentable(webView: webView, url: url)
       }
-      .padding(FlowHandle.diameter / 2)
-      .overlay { FlowNodeHandles(node: node, context: ctx) }
   }
   ```
 
-  `FlowNodeDragHandle` does **not** implement its own drag — it is a pass-through region (`.allowsHitTesting(false)`) that lets the Canvas's gesture handle the move. The behavior is therefore identical whether the user grabs the handle strip or drags a plain node, which also means a single `FlowStore.moveNode` call path and a single undo entry.
+  `FlowNodeDragHandle` does **not** install its own gesture — it just marks `content` with `.allowsHitTesting(false)` so the Canvas's `primaryDragGesture` underneath fires. The drag therefore goes through the same code path as a plain `FlowNode` drag, with one `FlowStore.moveNode` call and one undo entry. While the user is dragging, the live overlay unmounts and the Canvas keeps drawing the rasterized snapshot — so dragging a `WKWebView` / `MKMapView` is as smooth as dragging a plain card.
 
 ## Custom Edge Views
 

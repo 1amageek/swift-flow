@@ -70,10 +70,8 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
     let canvasSize: CGSize
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
     let renderContext: (FlowNode<NodeData>) -> NodeRenderContext
-    let interactionProxy: (FlowNode<NodeData>) -> FlowNodeInteractionProxy
     let activation: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool
     let coordinator: LiveNodeActivationCoordinator
-    let setHoveredNode: @MainActor (String?) -> Void
     let isViewportInteracting: Bool
 
     /// Screen-pixel inflation applied to the visible canvas rect so nodes
@@ -178,10 +176,6 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                             snapshot: context.snapshot
                         )
                     )
-                    .environment(
-                        \.flowNodeInteraction,
-                        interactionProxy(node)
-                    )
                     .frame(width: 0, height: 0)
                     .opacity(0)
                     .allowsHitTesting(false)
@@ -220,9 +214,7 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                     isViewportInteracting: isViewportInteracting,
                     mountPolicy: mountPolicy,
                     renderContext: renderContext(node),
-                    interactionProxy: interactionProxy(node),
-                    nodeContent: nodeContent,
-                    setHoveredNode: setHoveredNode
+                    nodeContent: nodeContent
                 )
                 .onChange(of: intent, initial: true) { _, newIntent in
                     coordinator.update(nodeID: node.id, intent: newIntent)
@@ -283,13 +275,19 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     let handleInset: CGFloat
     let isRenderedActive: Bool
     let shouldShow: Bool
+    /// Whether this row should accept hit tests. Plain rows whose
+    /// `nodeContent` does not embed a `LiveNode` rely on this being
+    /// `false` so taps and Canvas-level drags pass through to the
+    /// `Canvas` underneath. The owning overlay sets this to
+    /// `displayActive && !isViewportInteracting`; combined with the
+    /// per-row warmup gate below, an idle non-LiveNode row is always
+    /// hit-test transparent and the Canvas is the sole interaction
+    /// target.
     let isHittable: Bool
     let isViewportInteracting: Bool
     let mountPolicy: LiveNodeMountPolicy
     let renderContext: NodeRenderContext
-    let interactionProxy: FlowNodeInteractionProxy
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
-    let setHoveredNode: @MainActor (String?) -> Void
 
     /// Mount decision depends on the per-node mount policy:
     ///
@@ -335,13 +333,25 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
             // takes over once a snapshot exists — so until one lands
             // we mount the live subtree visibly and treat it as
             // active, which lets `MKMapView` / `WKWebView` kick their
-            // tile / load pipeline. Hit testing stays off during
-            // warmup so the user can't interact with a node that
-            // isn't user-active yet (Canvas-level gestures still
-            // pass through to selection / drag).
+            // tile / load pipeline.
+            //
+            // The row itself stays hit-test enabled so native
+            // representables (`WKWebView`, `MKMapView`, `AVPlayerView`)
+            // keep their own scroll / pan / tap handling. To make the
+            // node draggable, the caller wraps the grip region (a
+            // header bar, etc.) in ``FlowNodeDragHandle``, which marks
+            // that region with `.allowsHitTesting(false)` so the
+            // Canvas's `primaryDragGesture` underneath captures the
+            // drag — the same code path as a plain `FlowNode` drag.
             let isWarmingUp = renderContext.snapshot == nil
             let effectiveActive = isRenderedActive || isWarmingUp
             let effectiveVisible = shouldShow || isWarmingUp
+            // Hit testing stays off during warmup so the user can't
+            // interact with a node that isn't user-active yet — Canvas
+            // gestures (drag-to-move, marquee select) pass through.
+            // For non-LiveNode rows `snapshot` is always nil → warmup
+            // never ends → row stays hit-test transparent forever, so
+            // the Canvas remains the sole drag target for plain nodes.
             let effectiveHittable = isHittable && !isWarmingUp
 
             nodeContent(node, renderContext)
@@ -356,12 +366,10 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                         snapshot: renderContext.snapshot
                     )
                 )
-                .environment(\.flowNodeInteraction, interactionProxy)
                 .frame(
                     width: node.size.width + handleInset * 2,
                     height: node.size.height + handleInset * 2
                 )
-                .contentShape(Rectangle())
                 .scaleEffect(viewport.zoom, anchor: .topLeading)
                 .offset(
                     x: screenOrigin.x - handleInset * viewport.zoom,
@@ -369,16 +377,6 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                 )
                 .opacity(effectiveVisible ? 1 : 0)
                 .allowsHitTesting(effectiveHittable)
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active:
-                        setHoveredNode(node.id)
-                    case .ended:
-                        setHoveredNode(nil)
-                    @unknown default:
-                        break
-                    }
-                }
         } else {
             Color.clear.frame(width: 0, height: 0)
         }

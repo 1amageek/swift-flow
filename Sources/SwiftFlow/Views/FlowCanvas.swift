@@ -292,10 +292,6 @@ public struct FlowCanvas<
                             snapshot: context.snapshot
                         )
                     )
-                    .environment(
-                        \.flowNodeInteraction,
-                        nodeInteractionProxy(for: node)
-                    )
                     .tag(node.id)
             }
             if let edgeContentBuilder {
@@ -324,6 +320,7 @@ public struct FlowCanvas<
             viewportInteractionResetTask?.cancel()
             viewportInteractionResetTask = nil
             isViewportInteracting = false
+            store.cancelNodeDrag()
 
             #if os(macOS)
             releaseDragCursorIfNeeded()
@@ -403,10 +400,8 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
-                interactionProxy: { node in nodeInteractionProxy(for: node) },
                 activation: liveNodeActivationPredicate,
                 coordinator: liveNodeActivationCoordinator,
-                setHoveredNode: { id in store.setHoveredNode(id) },
                 isViewportInteracting: isViewportInteracting
             )
             if hasAccessory {
@@ -454,10 +449,8 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
-                interactionProxy: { node in nodeInteractionProxy(for: node) },
                 activation: liveNodeActivationPredicate,
                 coordinator: liveNodeActivationCoordinator,
-                setHoveredNode: { id in store.setHoveredNode(id) },
                 isViewportInteracting: isViewportInteracting
             )
             if hasAccessory {
@@ -798,25 +791,12 @@ public struct FlowCanvas<
                             handlePosition: handleHit.handlePosition
                         )
                     } else if let nodeID = store.hitTestNode(at: canvasPoint) {
-                        if liveNodeActivationCoordinator.liveNodeIDs.contains(nodeID) {
+                        store.beginNodeDrag(nodeID)
+                        guard store.isNodeDragging else {
                             dragMode = .none
                             return
                         }
-                        guard let node = store.nodeLookup[nodeID], node.isDraggable else {
-                            dragMode = .none
-                            return
-                        }
-                        var startPositions: [String: CGPoint] = [:]
-                        if node.isSelected, store.selectedNodeIDs.count > 1 {
-                            for selectedID in store.selectedNodeIDs {
-                                if let n = store.nodeLookup[selectedID], n.isDraggable {
-                                    startPositions[selectedID] = n.position
-                                }
-                            }
-                        } else {
-                            startPositions[nodeID] = node.position
-                        }
-                        dragMode = .nodeMove(startPositions: startPositions)
+                        dragMode = .nodeMove
                     } else if store.configuration.selectionEnabled,
                               store.configuration.multiSelectionEnabled {
                         let canvasStart = store.viewport.screenToCanvas(value.startLocation)
@@ -838,17 +818,8 @@ public struct FlowCanvas<
                     )
                     store.selectionRect = rect
                     store.selectInRect(rect)
-                case .nodeMove(let startPositions):
-                    let delta = CGSize(
-                        width: value.translation.width / store.viewport.zoom,
-                        height: value.translation.height / store.viewport.zoom
-                    )
-                    for (nodeID, startPosition) in startPositions {
-                        store.moveNode(nodeID, to: CGPoint(
-                            x: startPosition.x + delta.width,
-                            y: startPosition.y + delta.height
-                        ))
-                    }
+                case .nodeMove:
+                    store.updateNodeDrag(translation: value.translation)
                 case .connection:
                     let canvasPoint = store.viewport.screenToCanvas(value.location)
                     let target = draftConnectionTarget(at: canvasPoint)
@@ -867,8 +838,8 @@ public struct FlowCanvas<
                 switch dragMode {
                 case .selection:
                     store.selectionRect = nil
-                case .nodeMove(let startPositions):
-                    store.completeMoveNodes(from: startPositions)
+                case .nodeMove:
+                    store.endNodeDrag()
                 case .connection(let handle):
                     let canvasPoint = store.viewport.screenToCanvas(value.location)
                     if let target = draftConnectionTarget(at: canvasPoint, from: handle) {
@@ -1108,53 +1079,6 @@ public struct FlowCanvas<
         )
     }
 
-    private func nodeInteractionProxy(for node: FlowNode<NodeData>) -> FlowNodeInteractionProxy {
-        let nodeID = node.id
-        let store = store
-        return FlowNodeInteractionProxy(
-            nodeID: nodeID,
-            beginMove: {
-                guard let current = store.nodeLookup[nodeID] else { return [:] }
-                var starts: [String: CGPoint] = [:]
-                if current.isSelected, store.selectedNodeIDs.count > 1 {
-                    for id in store.selectedNodeIDs {
-                        if let other = store.nodeLookup[id], other.isDraggable {
-                            starts[id] = other.position
-                        }
-                    }
-                } else if current.isDraggable {
-                    starts[nodeID] = current.position
-                }
-                return starts
-            },
-            updateMove: { starts, translation in
-                let zoom = store.viewport.zoom
-                let dx = translation.width / zoom
-                let dy = translation.height / zoom
-                for (id, start) in starts {
-                    store.moveNode(id, to: CGPoint(
-                        x: start.x + dx,
-                        y: start.y + dy
-                    ))
-                }
-            },
-            endMove: { starts in
-                store.completeMoveNodes(from: starts)
-            },
-            selectNode: { additive in
-                if additive {
-                    if store.selectedNodeIDs.contains(nodeID) {
-                        store.deselectNode(nodeID)
-                    } else {
-                        store.selectNode(nodeID, exclusive: false)
-                    }
-                } else {
-                    store.selectNode(nodeID)
-                }
-            }
-        )
-    }
-
     private func draftConnectionTarget(
         at canvasPoint: CGPoint,
         from handle: HandleHitResult? = nil
@@ -1218,7 +1142,11 @@ public struct FlowCanvas<
 private enum CanvasDragMode {
     case none
     case selection(origin: CGPoint)
-    case nodeMove(startPositions: [String: CGPoint])
+    /// Active node-move drag. The session payload (start positions,
+    /// multi-select expansion) lives on `FlowStore.nodeDragSession` so
+    /// every drag site — Canvas-level and external `flowDragHandle`
+    /// modifier alike — funnels through the same dispatch.
+    case nodeMove
     case connection(HandleHitResult)
 }
 

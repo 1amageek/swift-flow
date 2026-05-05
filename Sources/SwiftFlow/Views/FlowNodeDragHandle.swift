@@ -1,16 +1,19 @@
 import SwiftUI
 
-/// A dedicated region a node exposes as its drag-to-move grip.
+/// Marks a region inside a `LiveNode` body as a pass-through drag area.
 ///
-/// The handle owns its own `DragGesture` and tap gesture, driven through
-/// the `\.flowNodeInteraction` environment value that `FlowCanvas`
-/// publishes for every node it evaluates. That keeps node interaction
-/// local to the node body — drags inside the handle move the node, drags
-/// outside (e.g. on a `WKWebView`, `MKMapView`, or other native
-/// representable in the same body) reach the inner view untouched.
+/// `LiveNode` mounts its content live on top of the Canvas so native
+/// representables (`WKWebView`, `MKMapView`, `AVPlayerView`) keep their
+/// own scrolling and gesture handling. Drags landing on those regions
+/// are therefore consumed by the inner view and never reach the Canvas's
+/// `primaryDragGesture`. Wrap a dedicated grip — typically a header bar
+/// — in `FlowNodeDragHandle` so its area becomes hit-test transparent
+/// and the Canvas drag underneath fires instead. The drag is then
+/// dispatched through the same code path as a plain `FlowNode` drag, so
+/// multi-selection moves, snap-to-grid, and undo behave identically.
 ///
-/// ```
-/// FlowCanvas(store: store) { node, _ in
+/// ```swift
+/// LiveNode(node: node) {
 ///     VStack(spacing: 0) {
 ///         FlowNodeDragHandle {
 ///             Text(node.data.title)
@@ -18,7 +21,7 @@ import SwiftUI
 ///                 .padding(6)
 ///                 .background(.thinMaterial)
 ///         }
-///         LiveNode { MyWebView(url: node.data.url) }
+///         WebRepresentable(webView: webView, url: url)
 ///     }
 /// }
 /// ```
@@ -26,53 +29,25 @@ import SwiftUI
 /// `content` defaults to a transparent rectangle so an invisible grip
 /// strip can be dropped in with just a frame:
 ///
-/// ```
+/// ```swift
 /// FlowNodeDragHandle()
 ///     .frame(height: 16)
 /// ```
 ///
-/// Multi-selection moves, viewport-zoom normalization, and undo
-/// registration are all handled by ``FlowNodeInteractionProxy``, so a
-/// drag triggered through the handle behaves exactly like a drag on a
-/// rasterized plain node.
-///
-/// When read outside a Flow node body the proxy is `nil` and gestures
-/// become no-ops — the view just renders its content.
+/// `FlowNodeDragHandle` does **not** install its own gesture — it only
+/// renders `content` with `.allowsHitTesting(false)`. The Canvas's
+/// `primaryDragGesture` is the single drag implementation; this widget
+/// just opens a window for it through the live overlay row.
 public struct FlowNodeDragHandle<Content: View>: View {
 
     private let content: () -> Content
-
-    @Environment(\.flowNodeInteraction) private var interaction
-    @State private var dragStartPositions: [String: CGPoint]?
 
     public init(@ViewBuilder content: @escaping () -> Content = { Color.clear }) {
         self.content = content
     }
 
     public var body: some View {
-        let drag = DragGesture(minimumDistance: 3)
-            .onChanged { value in
-                guard let interaction else { return }
-                let starts = dragStartPositions ?? interaction.beginMove()
-                if dragStartPositions == nil {
-                    dragStartPositions = starts
-                }
-                interaction.updateMove(starts, value.translation)
-            }
-            .onEnded { _ in
-                guard let interaction, let starts = dragStartPositions else {
-                    dragStartPositions = nil
-                    return
-                }
-                interaction.endMove(starts)
-                dragStartPositions = nil
-            }
-
-        return content()
-            .contentShape(Rectangle())
-            .gesture(drag)
-            .onTapGesture {
-                interaction?.selectNode(false)
-            }
+        content()
+            .allowsHitTesting(false)
     }
 }

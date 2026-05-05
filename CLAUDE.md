@@ -23,12 +23,14 @@ Canvas-based flow diagram library for SwiftUI (iOS 26+ / macOS 26+).
 Sources/SwiftFlow/
 ├── Animation/     # FlowAnimation (public API), PropertyAnimation (spring/easeInOut engine)
 ├── Changes/       # NodeChange, EdgeChange enums
+├── Document/      # Persisted graph data: FlowDocument, FlowNode, FlowEdge, Viewport, Handle*, EdgePathType
 ├── EdgePaths/     # BezierEdgePath, StraightEdgePath, SmoothStepEdgePath, SimpleBezierEdgePath
-├── Models/        # FlowNode, FlowEdge, FlowDocument, HandleDeclaration, Viewport, etc.
+├── Interaction/   # API-boundary input/output: DropPhase, ConnectionProposal, EdgeGeometry
+├── LiveNode/      # LiveNode subsystem: phase dispatcher, overlay, activation coordinator, mount/snapshot APIs, FlowNodeSnapshot
 ├── Protocols/     # EdgePathCalculating, ConnectionValidating
 ├── Store/         # FlowStore, FlowConfiguration
 ├── Styles/        # EdgeStyle
-├── Utilities/     # CGPointExtensions, GeometryHelpers
+├── Utilities/     # CGPointExtensions, GeometryHelpers, SelectionRect, HandleInfo
 └── Views/         # FlowCanvas, CanvasHostView (macOS), DefaultNodeContent, FlowHandle, MinimapView
 ```
 

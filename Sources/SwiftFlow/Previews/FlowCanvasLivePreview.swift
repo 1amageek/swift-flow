@@ -190,8 +190,13 @@ private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
 
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor [weak self] in
+            // `didFinish` fires after the load event for the main frame,
+            // including its subresources, so the network-side wait already
+            // scales with link quality. The remaining delay is a paint
+            // settle — the compositor needs a frame or two to commit the
+            // final layout before the snapshot reads pixels.
             do {
-                try await Task.sleep(nanoseconds: 250_000_000)
+                try await Task.sleep(nanoseconds: 500_000_000)
             } catch {
                 return
             }

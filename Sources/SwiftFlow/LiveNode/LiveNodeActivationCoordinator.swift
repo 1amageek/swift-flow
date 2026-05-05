@@ -91,6 +91,39 @@ final class LiveNodeActivationCoordinator {
 
     // MARK: - Preference application
 
+    /// Reconciles the registrar scope, LiveNode presence, and mount policies
+    /// from one preference snapshot. Within the evaluated scope, the snapshot
+    /// is authoritative; outside the scope, prior decisions carry over.
+    func applyPreferences(
+        evaluated: Set<String>,
+        present: Set<String>,
+        policies: [String: LiveNodeMountPolicy],
+        storeNodeIDs: Set<String>
+    ) {
+        let scoped = evaluated.intersection(storeNodeIDs)
+        guard !scoped.isEmpty else {
+            liveNodeIDs = liveNodeIDs.intersection(storeNodeIDs)
+            liveNodeMountPolicies = liveNodeMountPolicies.filter { storeNodeIDs.contains($0.key) }
+            if storeNodeIDs.isEmpty {
+                lastEvaluatedNodeIDs = []
+            }
+            return
+        }
+
+        lastEvaluatedNodeIDs = scoped
+        hasReceivedFirstPreferenceCycle = true
+
+        let withinScope = present.intersection(scoped)
+        let outsideScope = liveNodeIDs.subtracting(scoped)
+        liveNodeIDs = withinScope.union(outsideScope).intersection(storeNodeIDs)
+
+        var nextPolicies = liveNodeMountPolicies.filter { !scoped.contains($0.key) }
+        for (id, policy) in policies where scoped.contains(id) {
+            nextPolicies[id] = policy
+        }
+        liveNodeMountPolicies = nextPolicies.filter { storeNodeIDs.contains($0.key) }
+    }
+
     /// Stores the latest `EvaluatedNodeIDsKey` cycle, intersected with the
     /// store's current node ids. Empty cycles (which SwiftUI publishes
     /// during transient ForEach rebuilds) are ignored so they cannot

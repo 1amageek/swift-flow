@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import CoreGraphics
 @testable import SwiftFlow
 
 @Suite("FlowStore Tests")
@@ -289,6 +290,66 @@ struct FlowStoreTests {
         #expect(store.connectionDraft == nil)
     }
 
+    @Test("Set node snapshot ignores missing nodes")
+    func setNodeSnapshotIgnoresMissingNodes() {
+        let store = FlowStore<String>()
+        let snapshot = makeSnapshot()
+
+        store.setNodeSnapshot(snapshot, for: "missing")
+        #expect(store.nodeSnapshots["missing"] == nil)
+
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.setNodeSnapshot(snapshot, for: "n1")
+        #expect(store.nodeSnapshots["n1"] == snapshot)
+
+        store.removeNode("n1")
+        store.setNodeSnapshot(snapshot, for: "n1")
+        #expect(store.nodeSnapshots["n1"] == nil)
+    }
+
+    @Test("Snapshot generation rejects stale writes after load")
+    func snapshotGenerationRejectsStaleWritesAfterLoad() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "old"))
+        let staleGeneration = store.currentSnapshotGeneration()
+        let snapshot = makeSnapshot()
+
+        let document = FlowDocument(
+            nodes: [FlowNode(id: "n1", position: .zero, data: "new")],
+            edges: [],
+            viewport: Viewport()
+        )
+        store.load(document)
+
+        store.setNodeSnapshot(snapshot, for: "n1", generation: staleGeneration)
+        #expect(store.nodeSnapshots["n1"] == nil)
+
+        store.setNodeSnapshot(snapshot, for: "n1", generation: store.currentSnapshotGeneration())
+        #expect(store.nodeSnapshots["n1"] == snapshot)
+    }
+
+    @Test("Load normalizes decoded transient UI state")
+    func loadNormalizesDecodedTransientUIState() {
+        let store = FlowStore<String>()
+        var firstNode = FlowNode(id: "n1", position: .zero, data: "A", isSelected: true)
+        firstNode.isHovered = true
+        firstNode.isDropTarget = true
+        let secondNode = FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B")
+        var edge = FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2", isSelected: true)
+        edge.isDropTarget = true
+
+        store.load(FlowDocument(
+            nodes: [firstNode, secondNode],
+            edges: [edge],
+            viewport: Viewport()
+        ))
+
+        #expect(store.selectedNodeIDs.isEmpty)
+        #expect(store.selectedEdgeIDs.isEmpty)
+        #expect(store.nodes.allSatisfy { !$0.isSelected && !$0.isHovered && !$0.isDropTarget })
+        #expect(store.edges.allSatisfy { !$0.isSelected && !$0.isDropTarget })
+    }
+
     // MARK: - Viewport
 
     @Test("Viewport pan")
@@ -417,6 +478,8 @@ struct FlowStoreTests {
     @Test("Remove edge cleans up selectedEdgeIDs")
     func removeEdgeCleansSelection() {
         let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
         store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
         store.selectEdge("e1")
         #expect(store.selectedEdgeIDs.contains("e1"))
@@ -897,5 +960,24 @@ struct FlowStoreTests {
             store.moveNode("n1", to: CGPoint(x: CGFloat(i), y: 0))
         }
         #expect(callCount == 5)
+    }
+
+    private func makeSnapshot() -> FlowNodeSnapshot {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            fatalError("Failed to create test CGContext.")
+        }
+        guard let image = context.makeImage() else {
+            fatalError("Failed to create test CGImage.")
+        }
+        return FlowNodeSnapshot(cgImage: image, scale: 1, capturedAt: Date(timeIntervalSince1970: 0))
     }
 }

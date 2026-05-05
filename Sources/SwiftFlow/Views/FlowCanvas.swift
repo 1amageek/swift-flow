@@ -341,8 +341,9 @@ public struct FlowCanvas<
         // here would deadlock the bootstrap gate.
 
         let hasAccessory = nodeAccessoryBuilder != nil || edgeAccessoryBuilder != nil
+        let snapshotGeneration = store.currentSnapshotGeneration()
         let snapshotWriter: @MainActor (String, FlowNodeSnapshot) -> Void = { [store] id, snap in
-            store.setNodeSnapshot(snap, for: id)
+            store.setNodeSnapshot(snap, for: id, generation: snapshotGeneration)
         }
         #if os(macOS)
         let hostView = CanvasHostView(
@@ -1167,4 +1168,3 @@ private enum DragCursorKind: Equatable {
     }
 }
 #endif
-

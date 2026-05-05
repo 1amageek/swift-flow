@@ -23,6 +23,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     /// views). Not part of undo: this is a rendering cache, not document
     /// state.
     public private(set) var nodeSnapshots: [String: FlowNodeSnapshot] = [:]
+    private var snapshotGeneration: Int = 0
 
     // MARK: - Lookup Tables
 
@@ -199,7 +200,23 @@ public final class FlowStore<Data: Sendable & Hashable> {
     /// Store a rasterized snapshot for a node. Overwrites any prior entry.
     /// Not registered with undo — snapshots are a rendering cache.
     public func setNodeSnapshot(_ snapshot: FlowNodeSnapshot, for nodeID: String) {
+        guard nodeLookup[nodeID] != nil else { return }
         nodeSnapshots[nodeID] = snapshot
+    }
+
+    /// Current document-generation token for async snapshot writes.
+    public func currentSnapshotGeneration() -> Int {
+        snapshotGeneration
+    }
+
+    /// Store a rasterized snapshot only if it belongs to the current document generation.
+    public func setNodeSnapshot(
+        _ snapshot: FlowNodeSnapshot,
+        for nodeID: String,
+        generation: Int
+    ) {
+        guard generation == snapshotGeneration else { return }
+        setNodeSnapshot(snapshot, for: nodeID)
     }
 
     /// Drop the cached snapshot for a single node.
@@ -1338,13 +1355,27 @@ extension FlowStore where Data: Codable {
         // documents would briefly show the previous bitmap), the drag
         // session refers to nodes that are about to disappear, and any
         // pending interactive-update batch belongs to the old document.
+        snapshotGeneration += 1
         nodeSnapshots.removeAll()
         nodeDragSession = nil
         pendingNodeChanges.removeAll()
         isInteractiveUpdateActive = false
 
-        self.nodes = document.nodes
-        self.edges = document.edges
+        var loadedNodes = document.nodes
+        for index in loadedNodes.indices {
+            loadedNodes[index].isSelected = false
+            loadedNodes[index].isHovered = false
+            loadedNodes[index].isDropTarget = false
+        }
+
+        var loadedEdges = document.edges
+        for index in loadedEdges.indices {
+            loadedEdges[index].isSelected = false
+            loadedEdges[index].isDropTarget = false
+        }
+
+        self.nodes = loadedNodes
+        self.edges = loadedEdges
         self.viewport = document.viewport
         self.selectedNodeIDs = []
         self.selectedEdgeIDs = []

@@ -74,6 +74,10 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
     let coordinator: LiveNodeActivationCoordinator
     let isViewportInteracting: Bool
 
+    @State private var evaluatedNodeIDs: Set<String> = []
+    @State private var presentLiveNodeIDs: Set<String> = []
+    @State private var liveNodePolicies: [String: LiveNodeMountPolicy] = [:]
+
     /// Screen-pixel inflation applied to the visible canvas rect so nodes
     /// a short pan away are pre-mounted for smooth scroll-in.
     private static var preloadMargin: CGFloat { 200 }
@@ -236,36 +240,31 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
         .environment(\.liveNodeActivationCoordinator, coordinator)
-        // The registrar pass evaluates every node in the store, so this
-        // cycle's union is the authoritative scope for the presence /
-        // policy reconciliations below. An empty cycle (transient
-        // ForEach rebuild) is dropped inside the coordinator so it
-        // cannot erase prior decisions.
-        .onPreferenceChange(EvaluatedNodeIDsKey.self) { [coordinator, store] evaluated in
-            Task { @MainActor in
-                let storeNodeIDs = Set(store.nodes.map(\.id))
-                coordinator.applyEvaluatedNodeIDs(evaluated, storeNodeIDs: storeNodeIDs)
-            }
+        // The registrar pass evaluates every node in the store. Keep the
+        // three preference streams in local state and reconcile through one
+        // coordinator entry point so presence never reads an older scope.
+        .onPreferenceChange(EvaluatedNodeIDsKey.self) { evaluated in
+            evaluatedNodeIDs = evaluated
+            reconcilePreferences()
         }
-        .onPreferenceChange(LiveNodePresenceKey.self) { [coordinator, store] ids in
-            // Within the latest evaluated scope this cycle's presence
-            // set is authoritative — that is what drops a
-            // conditionally-disappeared LiveNode from `liveNodeIDs`.
-            // Outside the scope prior state carries over, so a partial
-            // cycle cannot demote untouched live nodes.
-            Task { @MainActor in
-                let storeNodeIDs = Set(store.nodes.map(\.id))
-                coordinator.applyLiveNodePresence(ids, storeNodeIDs: storeNodeIDs)
-            }
+        .onPreferenceChange(LiveNodePresenceKey.self) { ids in
+            presentLiveNodeIDs = ids
+            reconcilePreferences()
         }
-        .onPreferenceChange(LiveNodeMountPolicyKey.self) { [coordinator, store] policies in
-            // Mirror the presence reconciliation: within scope assign,
-            // outside scope keep prior, finally prune to storeNodeIDs.
-            Task { @MainActor in
-                let storeNodeIDs = Set(store.nodes.map(\.id))
-                coordinator.applyLiveNodeMountPolicies(policies, storeNodeIDs: storeNodeIDs)
-            }
+        .onPreferenceChange(LiveNodeMountPolicyKey.self) { policies in
+            liveNodePolicies = policies
+            reconcilePreferences()
         }
+    }
+
+    private func reconcilePreferences() {
+        let storeNodeIDs = Set(store.nodes.map(\.id))
+        coordinator.applyPreferences(
+            evaluated: evaluatedNodeIDs,
+            present: presentLiveNodeIDs,
+            policies: liveNodePolicies,
+            storeNodeIDs: storeNodeIDs
+        )
     }
 }
 

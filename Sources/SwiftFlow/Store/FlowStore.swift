@@ -170,15 +170,27 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     public func updateNode(_ nodeID: String, _ transform: (inout FlowNode<Data>) -> Void) {
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
+        let oldZIndex = nodes[index].zIndex
+        let oldSize = nodes[index].size
         transform(&nodes[index])
         nodeLookup[nodeID] = nodes[index]
+        if nodes[index].zIndex != oldZIndex {
+            rebuildSortedNodes()
+        }
+        if nodes[index].size != oldSize {
+            nodeSnapshots.removeValue(forKey: nodeID)
+        }
         emitNodeChange(.replace(nodes[index]))
     }
 
     public func updateNodeSize(_ nodeID: String, size: CGSize) {
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
+        let oldSize = nodes[index].size
         nodes[index].size = size
         nodeLookup[nodeID] = nodes[index]
+        if size != oldSize {
+            nodeSnapshots.removeValue(forKey: nodeID)
+        }
         emitNodeChange(.dimensions(nodeID: nodeID, size: size))
     }
 
@@ -490,8 +502,11 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     /// Set the animated state for a single edge.
     /// Animation state is managed separately from edge structure and never participates in undo.
+    /// No-ops when the edge id does not exist — phantom ids would otherwise
+    /// stay in `animatedEdgeIDs` and keep the animation loop alive forever.
     public func setEdgeAnimated(_ edgeID: String, _ animated: Bool) {
         if animated {
+            guard edges.contains(where: { $0.id == edgeID }) else { return }
             guard animatedEdgeIDs.insert(edgeID).inserted else { return }
         } else {
             guard animatedEdgeIDs.remove(edgeID) != nil else { return }
@@ -501,25 +516,28 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     /// Replace the entire set of animated edges at once.
     /// This is the most efficient way to synchronize animation state from an external source.
+    /// Filters the input down to ids that exist in `edges`, so callers cannot
+    /// poison the set with stale or fabricated ids.
     public func setAnimatedEdges(_ edgeIDs: Set<String>) {
-        guard animatedEdgeIDs != edgeIDs else { return }
-        animatedEdgeIDs = edgeIDs
+        let existingEdgeIDs = Set(edges.map(\.id))
+        let filtered = edgeIDs.intersection(existingEdgeIDs)
+        guard animatedEdgeIDs != filtered else { return }
+        animatedEdgeIDs = filtered
         startAnimationLoopIfNeeded()
     }
 
     // MARK: - Selection
 
     public func selectNode(_ nodeID: String, exclusive: Bool = true) {
+        guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
         let shouldExclusive = exclusive || !configuration.multiSelectionEnabled
         if shouldExclusive {
             clearSelection()
         }
         selectedNodeIDs.insert(nodeID)
-        if let index = nodes.firstIndex(where: { $0.id == nodeID }) {
-            nodes[index].isSelected = true
-            nodeLookup[nodeID] = nodes[index]
-            emitNodeChange(.select(nodeID: nodeID, isSelected: true))
-        }
+        nodes[index].isSelected = true
+        nodeLookup[nodeID] = nodes[index]
+        emitNodeChange(.select(nodeID: nodeID, isSelected: true))
     }
 
     public func deselectNode(_ nodeID: String) {
@@ -532,15 +550,14 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     public func selectEdge(_ edgeID: String, exclusive: Bool = true) {
+        guard let index = edges.firstIndex(where: { $0.id == edgeID }) else { return }
         let shouldExclusive = exclusive || !configuration.multiSelectionEnabled
         if shouldExclusive {
             clearSelection()
         }
         selectedEdgeIDs.insert(edgeID)
-        if let index = edges.firstIndex(where: { $0.id == edgeID }) {
-            edges[index].isSelected = true
-            onEdgesChange?([.select(edgeID: edgeID, isSelected: true)])
-        }
+        edges[index].isSelected = true
+        onEdgesChange?([.select(edgeID: edgeID, isSelected: true)])
     }
 
     public func deselectEdge(_ edgeID: String) {
@@ -1315,6 +1332,16 @@ extension FlowStore where Data: Codable {
         zoomAnchorState = nil
         nodePositionAnimations.removeAll()
         edgeDashPhase = 0
+
+        // Drop ephemeral state that does not survive a document swap:
+        // rendering snapshots are keyed by node id (collisions across
+        // documents would briefly show the previous bitmap), the drag
+        // session refers to nodes that are about to disappear, and any
+        // pending interactive-update batch belongs to the old document.
+        nodeSnapshots.removeAll()
+        nodeDragSession = nil
+        pendingNodeChanges.removeAll()
+        isInteractiveUpdateActive = false
 
         self.nodes = document.nodes
         self.edges = document.edges

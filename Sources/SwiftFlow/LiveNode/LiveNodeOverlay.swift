@@ -195,19 +195,25 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                 // re-render (LiveNode's outer `if liveNodeEnvironment`
                 // branch, ForEach rebuild) and a single empty cycle
                 // would tear the row down even though the user still
-                // wants the node active. The plain-row pass-through is
-                // handled inside `LiveNodeOverlayRow` (rows whose
-                // `nodeContent` doesn't contain a `LiveNode` simply
-                // render no live view, leaving the Canvas rasterize
-                // path as the sole drawer).
+                // wants the node active.
+                //
+                // `isLiveNode` gates whether the row mounts at all:
+                // plain (non-LiveNode) rows must never mount here
+                // because the Canvas `resolveSymbol` path already draws
+                // them. Without this guard, plain rows go through the
+                // warmup branch (`snapshot == nil` is permanent for
+                // them) and end up double-drawn at opacity 1 alongside
+                // the Canvas.
                 let intent = activation(node, store)
                 let renderedActive = coordinator.isRenderedActive(node.id)
                 let mountPolicy = coordinator.mountPolicy(for: node.id)
                 let displayActive = intent || renderedActive
+                let isLiveNode = coordinator.liveNodeIDs.contains(node.id)
                 LiveNodeOverlayRow(
                     node: node,
                     viewport: viewport,
                     handleInset: handleInset,
+                    isLiveNode: isLiveNode,
                     isRenderedActive: displayActive,
                     shouldShow: displayActive && !isViewportInteracting,
                     isHittable: displayActive && !isViewportInteracting,
@@ -273,16 +279,21 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     let node: FlowNode<NodeData>
     let viewport: Viewport
     let handleInset: CGFloat
+    /// Whether `nodeContent` actually embeds a `LiveNode`. Sourced from
+    /// the coordinator's presence set (registrar pass publishes it via
+    /// ``LiveNodePresenceKey``). When `false`, the row never mounts —
+    /// the Canvas `resolveSymbol` path is the sole drawer. Without this
+    /// gate, the warmup branch (`snapshot == nil` is permanent for plain
+    /// rows) would force opacity 1 and produce a double draw on top of
+    /// the Canvas.
+    let isLiveNode: Bool
     let isRenderedActive: Bool
     let shouldShow: Bool
-    /// Whether this row should accept hit tests. Plain rows whose
-    /// `nodeContent` does not embed a `LiveNode` rely on this being
-    /// `false` so taps and Canvas-level drags pass through to the
-    /// `Canvas` underneath. The owning overlay sets this to
-    /// `displayActive && !isViewportInteracting`; combined with the
-    /// per-row warmup gate below, an idle non-LiveNode row is always
-    /// hit-test transparent and the Canvas is the sole interaction
-    /// target.
+    /// Whether this row should accept hit tests. Combined with the
+    /// per-row warmup gate below, an idle row is always hit-test
+    /// transparent and the Canvas is the sole interaction target. For
+    /// plain rows the `isLiveNode == false` early return means this is
+    /// never consulted.
     let isHittable: Bool
     let isViewportInteracting: Bool
     let mountPolicy: LiveNodeMountPolicy
@@ -311,6 +322,14 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     /// of the gesture so native representables (`MKMapView`,
     /// `WKWebView`) are not subjected to live re-layout each frame.
     private var shouldMount: Bool {
+        // Plain (non-LiveNode) rows never mount: the Canvas symbol pass
+        // already draws them, and the warmup branch below would otherwise
+        // force a permanent opacity-1 mount because `snapshot == nil` is
+        // load-bearing only for LiveNode-backed rows.
+        guard isLiveNode else {
+            return false
+        }
+
         if isViewportInteracting {
             return false
         }

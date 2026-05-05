@@ -44,23 +44,31 @@ final class LiveNodeActivationCoordinator {
 
     /// IDs of nodes whose `nodeContent` currently contains a `LiveNode`.
     /// Populated by `FlowCanvas` from the aggregated
-    /// `LiveNodePresenceKey` preference. Canvas's rasterize draw and the
-    /// overlay's hit-testing / opacity gating both read this to leave
-    /// plain (non-live) nodes alone — the Canvas keeps drawing them and
-    /// the overlay keeps their row at opacity 0, so Canvas-level
-    /// gestures (drag, selection) pass through untouched.
-    var liveNodeIDs: Set<String> = [] {
-        didSet { hasReceivedFirstPreferenceCycle = true }
-    }
+    /// `LiveNodePresenceKey` preference, scoped by the latest
+    /// ``EvaluatedNodeIDsKey`` cycle so a `LiveNode` that conditionally
+    /// disappears (e.g. `if showLive { LiveNode { … } }`) is dropped
+    /// from this set instead of lingering forever via union semantics.
+    /// Canvas's rasterize draw and the overlay's hit-testing / opacity
+    /// gating both read this to leave plain (non-live) nodes alone —
+    /// the Canvas keeps drawing them and the overlay keeps their row
+    /// at opacity 0, so Canvas-level gestures (drag, selection) pass
+    /// through untouched.
+    private(set) var liveNodeIDs: Set<String> = []
 
-    /// Latches `true` the first time either presence or policy
-    /// preferences land. The overlay holds off mounting any row until
-    /// this is set, so a `.persistent` LiveNode's WKWebView never
-    /// briefly mounts at opacity 0 (which would let the WebContent
-    /// compositor go dormant before the policy preference arrives).
-    /// Plain flows with no live nodes never trip this — there's
-    /// nothing the overlay would mount in that case anyway.
+    /// Latches `true` the first time the registrar's
+    /// ``EvaluatedNodeIDsKey`` cycle lands. The overlay holds off
+    /// mounting any row until this is set, so a `.persistent`
+    /// LiveNode's WKWebView never briefly mounts at opacity 0 (which
+    /// would let the WebContent compositor go dormant before the
+    /// policy preference arrives).
     private(set) var hasReceivedFirstPreferenceCycle: Bool = false
+
+    /// Most recent set of node IDs evaluated by the registrar pass.
+    /// Treated as the **scope** within which presence and policy
+    /// preferences are authoritative for the latest cycle. Nodes
+    /// outside this scope keep their prior decisions, which is what
+    /// guards against transient empty preference cycles.
+    private(set) var lastEvaluatedNodeIDs: Set<String> = []
 
     /// Per-node mount policy declared by each `LiveNode` via
     /// `LiveNodeMountPolicyKey`. `LiveNodeOverlayRow` consults this to
@@ -70,9 +78,7 @@ final class LiveNodeActivationCoordinator {
     /// ``LiveNodeMountPolicy/onActivation`` — the bootstrap window
     /// before the first preference cycle lands, and any plain
     /// (non-live) row.
-    var liveNodeMountPolicies: [String: LiveNodeMountPolicy] = [:] {
-        didSet { hasReceivedFirstPreferenceCycle = true }
-    }
+    private(set) var liveNodeMountPolicies: [String: LiveNodeMountPolicy] = [:]
 
     /// Last observed intent per node (used only for edge detection).
     private var intent: [String: Bool] = [:]
@@ -82,6 +88,67 @@ final class LiveNodeActivationCoordinator {
 
     /// In-flight deactivation tasks keyed by node ID.
     private var deactivationTasks: [String: Task<Void, Never>] = [:]
+
+    // MARK: - Preference application
+
+    /// Stores the latest `EvaluatedNodeIDsKey` cycle, intersected with the
+    /// store's current node ids. Empty cycles (which SwiftUI publishes
+    /// during transient ForEach rebuilds) are ignored so they cannot
+    /// erase prior decisions.
+    func applyEvaluatedNodeIDs(
+        _ evaluated: Set<String>,
+        storeNodeIDs: Set<String>
+    ) {
+        let scoped = evaluated.intersection(storeNodeIDs)
+        guard !scoped.isEmpty else { return }
+        lastEvaluatedNodeIDs = scoped
+        hasReceivedFirstPreferenceCycle = true
+    }
+
+    /// Reconciles `liveNodeIDs` with the latest `LiveNodePresenceKey`
+    /// cycle. Within ``lastEvaluatedNodeIDs`` (the registrar's coverage
+    /// for the current cycle) presence is authoritative and replaces
+    /// prior state — that is what drops a conditionally-disappeared
+    /// `LiveNode` from `liveNodeIDs`. Outside that scope prior
+    /// decisions carry over so a partial preference cycle cannot
+    /// silently demote untouched live nodes.
+    func applyLiveNodePresence(
+        _ present: Set<String>,
+        storeNodeIDs: Set<String>
+    ) {
+        let evaluated = lastEvaluatedNodeIDs
+        guard !evaluated.isEmpty else {
+            // No evaluation cycle on record yet — fall back to the legacy
+            // union so the very first preference cycle (which may arrive
+            // before the registrar's evaluation propagates) is not lost.
+            liveNodeIDs = liveNodeIDs.union(present).intersection(storeNodeIDs)
+            return
+        }
+        let withinScope = present.intersection(evaluated)
+        let outsideScope = liveNodeIDs.subtracting(evaluated)
+        liveNodeIDs = withinScope.union(outsideScope).intersection(storeNodeIDs)
+    }
+
+    /// Reconciles `liveNodeMountPolicies` the same way as presence:
+    /// within the latest evaluated scope, the cycle's entries replace
+    /// prior values; outside the scope, prior values carry over.
+    func applyLiveNodeMountPolicies(
+        _ policies: [String: LiveNodeMountPolicy],
+        storeNodeIDs: Set<String>
+    ) {
+        let evaluated = lastEvaluatedNodeIDs
+        guard !evaluated.isEmpty else {
+            var merged = liveNodeMountPolicies
+            merged.merge(policies) { _, new in new }
+            liveNodeMountPolicies = merged.filter { storeNodeIDs.contains($0.key) }
+            return
+        }
+        var next = liveNodeMountPolicies.filter { !evaluated.contains($0.key) }
+        for (id, policy) in policies where evaluated.contains(id) {
+            next[id] = policy
+        }
+        liveNodeMountPolicies = next.filter { storeNodeIDs.contains($0.key) }
+    }
 
     // MARK: - Registration
 

@@ -179,6 +179,13 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                     .frame(width: 0, height: 0)
                     .opacity(0)
                     .allowsHitTesting(false)
+                    // Mark this node as evaluated this cycle. The
+                    // coordinator pairs the aggregated set with the
+                    // presence / policy preferences below so an
+                    // evaluated-but-absent id is treated as a *removal*
+                    // from `liveNodeIDs` rather than a transient empty
+                    // cycle that must be ignored.
+                    .preference(key: EvaluatedNodeIDsKey.self, value: [node.id])
             }
 
             ForEach(bootstrapped ? visibleNodes : [], id: \.id) { node in
@@ -229,30 +236,34 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
         }
         .frame(width: canvasSize.width, height: canvasSize.height, alignment: .topLeading)
         .environment(\.liveNodeActivationCoordinator, coordinator)
-        .onPreferenceChange(LiveNodePresenceKey.self) { [coordinator, store] ids in
-            // Merge into the existing presence set rather than replacing
-            // it. SwiftUI may publish a transient empty cycle during a
-            // ForEach rebuild or LiveNode `if` branch flip; a direct
-            // assignment would tear `liveNodeIDs` down even though the
-            // node body still wants to be live. The store's current set
-            // of node IDs is the authoritative gate that drops entries
-            // for removed nodes.
+        // The registrar pass evaluates every node in the store, so this
+        // cycle's union is the authoritative scope for the presence /
+        // policy reconciliations below. An empty cycle (transient
+        // ForEach rebuild) is dropped inside the coordinator so it
+        // cannot erase prior decisions.
+        .onPreferenceChange(EvaluatedNodeIDsKey.self) { [coordinator, store] evaluated in
             Task { @MainActor in
                 let storeNodeIDs = Set(store.nodes.map(\.id))
-                let merged = coordinator.liveNodeIDs.union(ids)
-                coordinator.liveNodeIDs = merged.intersection(storeNodeIDs)
+                coordinator.applyEvaluatedNodeIDs(evaluated, storeNodeIDs: storeNodeIDs)
+            }
+        }
+        .onPreferenceChange(LiveNodePresenceKey.self) { [coordinator, store] ids in
+            // Within the latest evaluated scope this cycle's presence
+            // set is authoritative — that is what drops a
+            // conditionally-disappeared LiveNode from `liveNodeIDs`.
+            // Outside the scope prior state carries over, so a partial
+            // cycle cannot demote untouched live nodes.
+            Task { @MainActor in
+                let storeNodeIDs = Set(store.nodes.map(\.id))
+                coordinator.applyLiveNodePresence(ids, storeNodeIDs: storeNodeIDs)
             }
         }
         .onPreferenceChange(LiveNodeMountPolicyKey.self) { [coordinator, store] policies in
-            // Same merge + intersection rule: keep previously-published
-            // policies, fold the latest cycle in, then prune entries for
-            // nodes no longer in the store.
+            // Mirror the presence reconciliation: within scope assign,
+            // outside scope keep prior, finally prune to storeNodeIDs.
             Task { @MainActor in
                 let storeNodeIDs = Set(store.nodes.map(\.id))
-                var merged = coordinator.liveNodeMountPolicies
-                merged.merge(policies) { _, new in new }
-                merged = merged.filter { storeNodeIDs.contains($0.key) }
-                coordinator.liveNodeMountPolicies = merged
+                coordinator.applyLiveNodeMountPolicies(policies, storeNodeIDs: storeNodeIDs)
             }
         }
     }

@@ -246,6 +246,7 @@ struct CanvasHostView<Content: View>: UIViewRepresentable {
     func makeUIView(context: Context) -> CanvasUIHostView<Content> {
         let hostView = CanvasUIHostView<Content>()
         hostView.onPan = onPan
+        hostView.registeredDropTypes = registeredDropTypes
         hostView.onDrop = onDrop
         let hosting = UIHostingController(rootView: content)
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
@@ -263,6 +264,7 @@ struct CanvasHostView<Content: View>: UIViewRepresentable {
 
     func updateUIView(_ uiView: CanvasUIHostView<Content>, context: Context) {
         uiView.onPan = onPan
+        uiView.registeredDropTypes = registeredDropTypes
         uiView.onDrop = onDrop
         uiView.hostingController?.rootView = content
     }
@@ -272,6 +274,13 @@ final class CanvasUIHostView<Content: View>: UIView, UIDropInteractionDelegate {
 
     var onPan: (@MainActor (CGSize) -> Void)?
     var hostingController: UIHostingController<Content>?
+
+    /// UTType identifiers the canvas should accept. Mirrors macOS's
+    /// `registerForDraggedTypes` semantics: empty means no drops, non-empty
+    /// means accept only sessions / items conforming to one of the listed
+    /// type identifiers (hierarchy-aware via
+    /// `NSItemProvider.hasItemConformingToTypeIdentifier(_:)`).
+    var registeredDropTypes: [String] = []
 
     var onDrop: (@MainActor (CanvasDropEvent) -> Bool)? {
         didSet {
@@ -329,13 +338,29 @@ final class CanvasUIHostView<Content: View>: UIView, UIDropInteractionDelegate {
 
     // MARK: - UIDropInteractionDelegate
 
+    /// Filter to providers whose registered type identifiers conform to at
+    /// least one of `registeredDropTypes`. Hierarchy-aware: a provider that
+    /// vends `public.png` is accepted when the canvas registers for
+    /// `public.image`. Returns an empty array when no types are registered,
+    /// matching macOS's `unregisterDraggedTypes` behaviour.
+    private func filterAcceptedProviders(_ providers: [NSItemProvider]) -> [NSItemProvider] {
+        guard !registeredDropTypes.isEmpty else { return [] }
+        return providers.filter { provider in
+            registeredDropTypes.contains { provider.hasItemConformingToTypeIdentifier($0) }
+        }
+    }
+
     func dropInteraction(_ interaction: UIDropInteraction, canHandle session: any UIDropSession) -> Bool {
-        return onDrop != nil
+        guard onDrop != nil, !registeredDropTypes.isEmpty else { return false }
+        return session.hasItemsConforming(toTypeIdentifiers: registeredDropTypes)
     }
 
     func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: any UIDropSession) -> UIDropProposal {
         let location = session.location(in: self)
-        let providers = session.items.map { $0.itemProvider }
+        let providers = filterAcceptedProviders(session.items.map { $0.itemProvider })
+        guard !providers.isEmpty else {
+            return UIDropProposal(operation: .cancel)
+        }
         var accepted = false
         MainActor.assumeIsolated {
             accepted = onDrop?(.updated(providers, location)) ?? false
@@ -351,7 +376,8 @@ final class CanvasUIHostView<Content: View>: UIView, UIDropInteractionDelegate {
 
     func dropInteraction(_ interaction: UIDropInteraction, performDrop session: any UIDropSession) {
         let location = session.location(in: self)
-        let providers = session.items.map { $0.itemProvider }
+        let providers = filterAcceptedProviders(session.items.map { $0.itemProvider })
+        guard !providers.isEmpty else { return }
         MainActor.assumeIsolated {
             _ = onDrop?(.performed(providers, location))
         }

@@ -19,7 +19,7 @@ public struct FlowCanvas<
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
     private var accessoryAnimation: Animation? = .spring(duration: 0.25, bounce: 0.05)
     private var liveNodeInteractionPredicate: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool = { node, store in
-        store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
+        store.hoveredNodeID == node.id
     }
     private var registeredDropTypes: [String] = []
     private var dropHandler: (@MainActor @Sendable (_ event: CanvasDropEvent) -> Bool)? = nil
@@ -139,14 +139,14 @@ public struct FlowCanvas<
     /// Overrides the predicate that decides which nodes are interactive in
     /// the live overlay layer.
     ///
-    /// The default predicate returns `true` when the node is selected or
-    /// hovered. This mirrors macOS window behavior: a LiveNode can receive
-    /// scroll and pointer events while hovered even if it is not selected.
+    /// The default predicate returns `true` only while the node is hovered.
     /// Selection and keyboard focus are exposed separately through
-    /// `\.isFlowNodeSelected` and `\.isFlowNodeFocused`.
+    /// `\.isFlowNodeSelected` and `\.isFlowNodeFocused`, and do not by
+    /// themselves promote a node into the live overlay layer. This keeps
+    /// large multi-selections cheap.
     ///
-    /// Apps that want a different policy (e.g., keep a node live while a
-    /// media player is playing, or suspend live rendering during a
+    /// Apps that want a different policy (for example, keep a media node
+    /// live while it is playing, or suspend live rendering during a
     /// connection draft) should supply their own.
     public func liveNodeInteraction(
         _ isInteractive: @escaping (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool
@@ -820,8 +820,7 @@ public struct FlowCanvas<
                             handlePosition: handleHit.handlePosition
                         )
                     } else if let nodeID = store.hitTestNode(at: canvasPoint) {
-                        store.beginNodeDrag(nodeID)
-                        guard store.isNodeDragging else {
+                        guard store.beginNodeDragFromPointer(nodeID, mode: .replace) else {
                             dragMode = .none
                             return
                         }

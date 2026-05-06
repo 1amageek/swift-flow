@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 /// Decouples the raw interaction **intent** (the overlay's predicate result
-/// — "user is hovering or selecting this node") from the **rendered
+/// — "this node should currently be live") from the **rendered
 /// interactive** state (whether `LiveNodeOverlay` actually shows the live view
 /// at opacity 1).
 ///
@@ -297,14 +297,15 @@ final class LiveNodeInteractionCoordinator {
 
     /// Whether the Canvas's rasterize path should skip this node because
     /// the overlay is currently drawing a live view for it. Plain
-    /// (non-live) rows answer `false` even when hovered/selected, so
+    /// (non-live) rows answer `false` even when hovered or selected, so
     /// Canvas keeps drawing them — otherwise the node would disappear
     /// the instant the user moves the cursor over it.
     ///
     /// **Poster pattern**: every LiveNode (regardless of mount policy)
     /// is drawn by the Canvas as a snapshot poster while not interactive, and
-    /// only swaps to the live overlay view while the user is hovering
-    /// or has selected it. ``LiveNodeMountPolicy/persistent`` differs
+    /// only swaps to the live overlay view while the interaction predicate
+    /// returns true. By default that means the user is hovering the node.
+    /// ``LiveNodeMountPolicy/persistent`` differs
     /// from ``LiveNodeMountPolicy/onInteraction`` only in **mount**
     /// behaviour — the underlying native view stays in the SwiftUI
     /// tree so its CARemoteLayer pipeline doesn't stall — not in
@@ -321,8 +322,8 @@ final class LiveNodeInteractionCoordinator {
     /// `WKWebView` / `MKMapView` should only intercept scroll / click
     /// while the user is actually interacting with the node. When the
     /// row is not interactive, hit-testing is off so a click passes through
-    /// to Canvas — letting selection trigger and, in turn, interact the
-    /// row through the predicate.
+    /// to Canvas — letting the Canvas continue to own selection and drag
+    /// gestures while the node is not live.
     func overlayIsHittable(_ nodeID: String) -> Bool {
         liveNodeIDs.contains(nodeID) && renderedInteractive.contains(nodeID)
     }

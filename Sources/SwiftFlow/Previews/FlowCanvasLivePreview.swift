@@ -12,10 +12,14 @@ private enum LivePreviewData: Sendable, Hashable {
     case web(url: URL, title: String)
     case map(latitude: Double, longitude: Double, title: String)
     case resizable(title: String, color: String)
+    case timeline(title: String, color: String)
 
     var title: String {
         switch self {
-        case let .web(_, title), let .map(_, _, title), let .resizable(title, _):
+        case let .web(_, title),
+             let .map(_, _, title),
+             let .resizable(title, _),
+             let .timeline(title, _):
             return title
         }
     }
@@ -25,6 +29,7 @@ private enum LivePreviewData: Sendable, Hashable {
         case .web:       return .blue
         case .map:       return .green
         case .resizable: return .orange
+        case .timeline:  return .teal
         }
     }
 
@@ -33,6 +38,7 @@ private enum LivePreviewData: Sendable, Hashable {
         case .web:       return "globe"
         case .map:       return "map"
         case .resizable: return "square.resize"
+        case .timeline:  return "clock"
         }
     }
 }
@@ -423,14 +429,21 @@ private struct LiveFlowPreview: View {
                 ),
                 FlowNode(
                     id: "scratch",
-                    position: CGPoint(x: 520, y: 240),
+                    position: CGPoint(x: 520, y: 300),
                     size: CGSize(width: 220, height: 140),
                     data: .resizable(title: "Resize Me", color: "orange")
+                ),
+                FlowNode(
+                    id: "timeline",
+                    position: CGPoint(x: 520, y: 80),
+                    size: CGSize(width: 260, height: 160),
+                    data: .timeline(title: "Timeline Live", color: "teal")
                 ),
             ],
             edges: [
                 FlowEdge(id: "e1", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "tokyo", targetHandleID: "target"),
                 FlowEdge(id: "e2", sourceNodeID: "tokyo", sourceHandleID: "source", targetNodeID: "scratch", targetHandleID: "target"),
+                FlowEdge(id: "e3", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "timeline", targetHandleID: "target"),
             ]
         )
     }()
@@ -441,7 +454,10 @@ private struct LiveFlowPreview: View {
                 nodeBody(for: node, context: context)
             }
             .liveNodeInteraction { node, store in
-                store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
+                if case .timeline = node.data {
+                    return true
+                }
+                return store.hoveredNodeID == node.id
             }
             .overlay {
                 ForEach(Array(store.selectedNodeIDs), id: \.self) { nodeID in
@@ -454,7 +470,7 @@ private struct LiveFlowPreview: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Live Node Preview")
                     .font(.headline)
-                Text("Hover or select a node to switch from snapshot to its live view.")
+                Text("Hover a node to switch from snapshot to its live view. Timeline Live stays live through liveNodeInteraction.")
                 Text("Drag from the header strip — flowDragHandle(for:in:) routes the drag through FlowStore, so the WKWebView / MKMapView body keeps its own scroll/pan.")
                     .foregroundStyle(.secondary)
                 Text("Select the orange node and drag a corner handle to resize.")
@@ -582,6 +598,11 @@ private struct LivePreviewNodeBody: View {
             windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
                 resizableBody(color: color, contentSize: contentSize)
             }
+
+        case let .timeline(_, color):
+            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
+                timelineBody(color: color, contentSize: contentSize)
+            }
         }
     }
 
@@ -671,8 +692,48 @@ private struct LivePreviewNodeBody: View {
         case "blue":   return .blue
         case "orange": return .orange
         case "green":  return .green
+        case "teal":   return .teal
         default:       return .gray
         }
+    }
+
+    private func timelineBody(color colorName: String, contentSize: CGSize) -> some View {
+        let color = resizableColor(named: colorName)
+        let liveNode = contentNode(size: contentSize)
+
+        return LiveNode(node: liveNode) {
+            TimelineView(.animation) { timeline in
+                let time = timeline.date.timeIntervalSinceReferenceDate
+                let seconds = Int(time) % 60
+                let pulse = 0.5 + 0.5 * sin(time * 3)
+
+                ZStack {
+                    color.opacity(0.12 + 0.16 * pulse)
+
+                    VStack(spacing: 8) {
+                        Text("Live by predicate")
+                            .font(.caption.weight(.semibold))
+                        Text(String(format: "%02d", seconds))
+                            .font(.system(size: 44, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                        Text("Not tied to selection")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Circle()
+                        .stroke(color.opacity(0.22), lineWidth: 8)
+                        .frame(width: min(contentSize.width, contentSize.height) * 0.72)
+
+                    Circle()
+                        .trim(from: 0, to: 0.2 + 0.6 * pulse)
+                        .stroke(color, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                        .rotationEffect(.degrees(time * 90))
+                        .frame(width: min(contentSize.width, contentSize.height) * 0.72)
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 

@@ -10,8 +10,9 @@ import SwiftUI
 ///
 /// ## Mount policy
 ///
-/// A row is mounted here only when it is **interactive** (user is hovering or
-/// selecting it) or **warming up** (no snapshot has been captured yet).
+/// A row is mounted here only when it is **interactive** (the interaction
+/// predicate currently returns true) or **warming up** (no snapshot has been
+/// captured yet).
 /// Everything else falls through to the Canvas `resolveSymbol` path,
 /// which draws the stored snapshot image via `FlowNodeSnapshot` — cheap,
 /// and the reason large flows with dozens of idle LiveNodes stay
@@ -198,7 +199,7 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                 // Evaluate the interaction predicate for every visible
                 // node (cheap — just a bool) and forward the edge to the
                 // coordinator. This is what promotes a node into
-                // `renderedInteractive` on first hover/select. Mutation of
+                // `renderedInteractive` on first interaction intent. Mutation of
                 // `@Observable` state happens inside `.onChange`, never
                 // during body, to avoid self-invalidating the render.
                 //
@@ -292,8 +293,8 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
 /// One row in the overlay. Mounts `nodeContent` in the `.live` phase for
 /// two reasons:
 ///
-/// - **Interactive**: the coordinator says the user is hovering/selecting this
-///   node, so the live view must replace the Canvas snapshot.
+/// - **Interactive**: the coordinator says this node currently has interaction
+///   intent, so the live view must replace the Canvas snapshot.
 /// - **Warmup**: the node has no snapshot yet, so the live view must mount
 ///   invisibly long enough to produce one — this is the only path that
 ///   boots up native representables (WKWebView load, MKMapView tile

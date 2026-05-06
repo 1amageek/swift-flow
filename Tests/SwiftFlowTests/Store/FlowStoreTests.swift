@@ -178,6 +178,27 @@ struct FlowStoreTests {
         #expect(store.focusedTarget == nil)
     }
 
+    @Test("Pointer drag selection matches node selection")
+    func pointerDragSelection() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 100, y: 0), data: "B"))
+
+        let didBeginSingleDrag = store.beginNodeDragFromPointer("n1", mode: .replace)
+        #expect(didBeginSingleDrag == true)
+        #expect(store.selectedNodeIDs == Set(["n1"]))
+        #expect(store.focusedTarget == .node("n1"))
+        #expect(store.activeInteraction == .draggingNodes(["n1"]))
+        store.endNodeDrag()
+
+        store.selectNodeFromPointer("n2", mode: .toggle)
+        let didBeginMultiDrag = store.beginNodeDragFromPointer("n1", mode: .replace)
+        #expect(didBeginMultiDrag == true)
+        #expect(store.selectedNodeIDs == Set(["n1", "n2"]))
+        #expect(store.focusedTarget == .node("n1"))
+        #expect(store.activeInteraction == .draggingNodes(["n1", "n2"]))
+    }
+
     @Test("Focus ignores missing targets and clears explicitly")
     func focusLifecycle() {
         let store = FlowStore<String>()

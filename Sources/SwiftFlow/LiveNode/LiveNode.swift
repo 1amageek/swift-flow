@@ -157,8 +157,6 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     @Environment(\.defersLiveNodeSnapshotWrites) private var defersSnapshotWrites
 
     @State private var nativeCapture = LiveNodeNativeCaptureRegistry()
-    @State private var remountGeneration: Int = 0
-    @State private var previousInteractiveState: Bool = false
     @State private var hasSeededInitialSnapshot: Bool = false
     private var contentContext: LiveNodeContentContext {
         LiveNodeContentContext(
@@ -178,11 +176,10 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
                 value: [environment.id: configuration.mountPolicy]
             )
             .environment(\.liveNodeSnapshotContext, makeSnapshotContext())
-            .onAppear {
-                previousInteractiveState = isInteractive
-            }
-            .onChange(of: isInteractive) { _, newValue in
-                handleInteractiveStateChange(newValue)
+            .onChange(of: isInteractive) { oldValue, newValue in
+                LiveNodeDebugLog.log(
+                    "interactive.changed node=\(environment.id) previous=\(oldValue) next=\(newValue) mount=\(configuration.mountPolicy)"
+                )
             }
     }
 
@@ -199,7 +196,6 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
             LiveNodeLiveBody(
                 snapshot: environment.snapshot,
                 mountPolicy: configuration.mountPolicy,
-                remountGeneration: remountGeneration,
                 content: { content(contentContext) }
             )
             .task(id: environment.id) {
@@ -209,23 +205,6 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
             .onDisappear {
                 unregisterInteractionEndCapture()
             }
-        }
-    }
-
-    private func handleInteractiveStateChange(_ isNowInteractive: Bool) {
-        defer { previousInteractiveState = isNowInteractive }
-
-        LiveNodeDebugLog.log(
-            "interactive.changed node=\(environment.id) previous=\(previousInteractiveState) next=\(isNowInteractive) mount=\(configuration.mountPolicy)"
-        )
-
-        guard isNowInteractive, previousInteractiveState == false else {
-            return
-        }
-
-        if configuration.mountPolicy == .remountOnInteraction {
-            remountGeneration += 1
-            LiveNodeDebugLog.log("remount.generation node=\(environment.id) generation=\(remountGeneration)")
         }
     }
 
@@ -377,7 +356,6 @@ private struct RasterizedNodeBody<Placeholder: View>: View {
 private struct LiveNodeLiveBody<Content: View>: View {
     let snapshot: FlowNodeSnapshot?
     let mountPolicy: LiveNodeMountPolicy
-    let remountGeneration: Int
     let content: () -> Content
 
     var body: some View {
@@ -388,27 +366,16 @@ private struct LiveNodeLiveBody<Content: View>: View {
             }
 
             content()
-                .id(contentIdentity)
         }
     }
 
     private var shouldDrawSnapshotBackdrop: Bool {
         switch mountPolicy {
-        case .onInteraction, .remountOnInteraction:
+        case .onInteraction:
             return true
 
         case .persistent:
             return false
-        }
-    }
-
-    private var contentIdentity: String {
-        switch mountPolicy {
-        case .onInteraction, .persistent:
-            return "stable"
-
-        case .remountOnInteraction:
-            return "remount-\(remountGeneration)"
         }
     }
 }

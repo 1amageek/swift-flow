@@ -1,15 +1,12 @@
 import Foundation
 
 /// Whether `LiveNode` keeps its live subtree mounted across interaction
-/// transitions, mounts it only on demand, or recreates it from scratch on
-/// every interaction.
+/// transitions or mounts it only on demand.
 ///
-/// The choice is dictated by the live content's tolerance for SwiftUI
-/// remount cycles. SwiftUI-only views rebuild their state cheaply on each
-/// remount, so the default ``onInteraction`` minimizes idle work. Native
-/// representables backed by an out-of-process renderer (`WKWebView`,
-/// `MKMapView`, `AVPlayerView`) need different handling — see the cases
-/// for guidance.
+/// SwiftUI-only views rebuild their state cheaply on each interaction, so
+/// the default ``onInteraction`` minimizes idle work. Native
+/// representables backed by a renderer with meaningful view identity
+/// (`WKWebView`, `MKMapView`, `AVPlayerView`) should use ``persistent``.
 public enum LiveNodeMountPolicy: Sendable, Hashable {
     /// Mount the live subtree only while the node is interactive.
     ///
@@ -19,14 +16,8 @@ public enum LiveNodeMountPolicy: Sendable, Hashable {
 
     /// Keep the live subtree mounted while the node is present.
     ///
-    /// Useful for views that are expensive or fragile to remount,
+    /// Useful for views that are expensive or fragile to recreate,
     /// especially native renderers such as `WKWebView` and `MKMapView`.
     /// Keeping their view identity avoids detach/reattach side effects.
     case persistent
-
-    /// Recreate the live subtree every time the node becomes interactive.
-    ///
-    /// Useful only for views that need a fresh native identity on every
-    /// interaction cycle.
-    case remountOnInteraction
 }

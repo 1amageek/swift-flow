@@ -202,10 +202,9 @@ final class LiveNodeInteractionCoordinator {
     /// Clears the capture handler for a node. **Does not** touch
     /// `intent`, `renderedInteractive`, or in-flight interaction-end tasks —
     /// `LiveNode`'s `onDisappear` fires for view-tree reasons that are
-    /// not actually node interaction ends (`.remountOnInteraction` swapping
-    /// its inner content, viewport cull, transient parent re-layout),
-    /// and tearing down interaction state from any of those would make
-    /// the overlay drop the row mid-display.
+    /// not actually node interaction ends (viewport cull, transient parent
+    /// re-layout), and tearing down interaction state from any of those
+    /// would make the overlay drop the row mid-display.
     ///
     /// Cancelling the interaction-end task here is also wrong: the task
     /// is the driver of `renderedInteractive.remove`, so cancelling it

@@ -32,8 +32,8 @@ public struct LiveNodePresenceKey: PreferenceKey {
 }
 
 /// Aggregates per-node mount policies so the overlay/coordinator can
-/// decide whether to mount a row only on interaction, keep it persistent,
-/// or remount it when interaction begins.
+/// decide whether to mount a row only on interaction or keep it
+/// persistent.
 public struct LiveNodeMountPolicyKey: PreferenceKey {
     public static let defaultValue: [String: LiveNodeMountPolicy] = [:]
 

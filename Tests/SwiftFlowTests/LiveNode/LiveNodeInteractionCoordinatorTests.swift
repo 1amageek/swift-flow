@@ -14,14 +14,14 @@ struct LiveNodeInteractionCoordinatorTests {
             present: ["a", "b"],
             policies: [
                 "a": .persistent,
-                "b": .remountOnInteraction,
+                "b": .onInteraction,
             ],
             storeNodeIDs: ["a", "b"]
         )
 
         #expect(coordinator.liveNodeIDs == ["a", "b"])
         #expect(coordinator.liveNodeMountPolicies["a"] == .persistent)
-        #expect(coordinator.liveNodeMountPolicies["b"] == .remountOnInteraction)
+        #expect(coordinator.liveNodeMountPolicies["b"] == .onInteraction)
 
         coordinator.applyPreferences(
             evaluated: ["b"],

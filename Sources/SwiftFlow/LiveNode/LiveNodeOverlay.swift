@@ -25,13 +25,12 @@ import SwiftUI
 /// a snapshot from. Once `context.snapshot` is non-nil the row unmounts
 /// and the Canvas takes over drawing.
 ///
-/// Trade-off: WKWebView / MKMapView / AVPlayer identity is **not**
-/// preserved by SwiftUI across interaction end — each interaction remounts
-/// the representable. Callers typically keep the underlying object alive
-/// outside SwiftUI (e.g. a bag keyed by node ID) so remount reuses the
-/// same instance, preserving page / region / playback state. For
-/// SwiftUI-only `LiveNode`s the snapshot captured on interaction end keeps
-/// the rasterize frame visually identical, so the swap is seamless.
+/// Trade-off: `.onInteraction` rows do not preserve SwiftUI view identity
+/// across interaction end. Use `.persistent` for native representables
+/// whose renderer, scroll state, or helper process depends on the same
+/// view instance staying attached. For SwiftUI-only `LiveNode`s the
+/// snapshot captured on interaction end keeps the rasterize frame visually
+/// identical, so the swap is seamless.
 ///
 /// ## Intent driver
 ///
@@ -344,14 +343,13 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
 
     /// Mount decision depends on the per-node mount policy:
     ///
-    /// - `.onInteraction` (default) and `.remountOnInteraction`: mount
-    ///   while interactive OR while the node still has no snapshot — the
-    ///   latter lets native representables load their content and seed
-    ///   the snapshot, after which the row unmounts and the Canvas
-    ///   draws from the snapshot instead. Both policies also unmount
-    ///   while the user is panning or zooming so the Canvas poster
-    ///   takes over for the duration of the gesture; this avoids
-    ///   per-frame SwiftUI re-layout for the live subtree.
+    /// - `.onInteraction` (default): mount while interactive OR while
+    ///   the node still has no snapshot — the latter lets SwiftUI-only
+    ///   live nodes seed the snapshot, after which the row unmounts and
+    ///   the Canvas draws from the snapshot instead. It also unmounts
+    ///   while the user is panning or zooming so the Canvas poster takes
+    ///   over for the duration of the gesture; this avoids per-frame
+    ///   SwiftUI re-layout for the live subtree.
     /// - `.persistent`: stay mounted regardless of interaction OR
     ///   viewport interaction. Required for native representables
     ///   backed by a separate process — their `removeFromSuperview`
@@ -372,7 +370,7 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
         }
 
         switch mountPolicy {
-        case .onInteraction, .remountOnInteraction:
+        case .onInteraction:
             // Unmount during pan/zoom so the live subtree is not subjected
             // to per-frame re-layout — the Canvas poster covers the
             // gesture window.

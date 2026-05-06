@@ -239,7 +239,7 @@ For SwiftUI-only content the library re-captures on interaction end using `Image
 |---|---|
 | `write(_:)` | Push a snapshot directly — call after a navigation completes (`WKWebView`), a tile pass lands (`MKMapView`), or any other moment the app already has a fresh frame in hand |
 | `registerCapture(_:)` | Install an async capture handler that `LiveNode` invokes during the interaction-end pipeline — the handler typically reads from the live native view weakly and produces a `FlowNodeSnapshot` |
-| `unregisterCapture()` | Clear the handler — call from `dismantleUIView` / `dismantleNSView` so a remount cycle does not leave a stale handler bound to a dead view |
+| `unregisterCapture()` | Clear the handler — call from `dismantleUIView` / `dismantleNSView` so teardown does not leave a stale handler bound to a dead view |
 | `requestCapture()` | Drive a capture pass on demand, e.g. to seed the poster shortly after the view first attaches |
 
 The recommended pattern is to own the native view in `@State` and let the representable wire the snapshot context in `makeUIView` / `makeNSView`:
@@ -292,14 +292,18 @@ Snapshot helpers are framework-specific. For `WKWebView`:
 extension WKWebView {
     @MainActor
     func makeFlowNodeSnapshot() async -> FlowNodeSnapshot? {
-        let image = try? await takeSnapshot(configuration: WKSnapshotConfiguration())
-        guard let cgImage = image?.cgImage else { return nil }
-        return FlowNodeSnapshot(cgImage: cgImage, scale: image!.scale)
+        do {
+            let image = try await takeSnapshot(configuration: WKSnapshotConfiguration())
+            guard let cgImage = image.cgImage else { return nil }
+            return FlowNodeSnapshot(cgImage: cgImage, scale: image.scale)
+        } catch {
+            return nil
+        }
     }
 }
 ```
 
-`MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). `MKMapView` additionally needs `mount: .remountOnInteraction` rather than `.persistent` — see [Mount Policy](#mount-policy) for why.
+`MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). Use `mount: .persistent` for MapKit so the same `MKMapView` instance stays attached across hover / selection transitions, and write a snapshot after `mapViewDidFinishRenderingMap(_:fullyRendered:)` when MapKit has produced a fresh frame.
 
 When the live content is pure SwiftUI, the representable simply does not register a capture handler. `LiveNode` falls back to `ImageRenderer` to produce the interaction end snapshot.
 
@@ -309,13 +313,12 @@ When the live content is pure SwiftUI, the representable simply does not registe
 
 | `LiveNodeMountPolicy` | Behavior |
 |---|---|
-| `.onInteraction` *(default)* | The row mounts only while the interaction predicate is true (or while the first snapshot is being warmed). Once interaction ends, the live subtree leaves the view tree and the Canvas rasterize path takes over. Suitable for SwiftUI-only content — its state rebuilds from scratch on each remount and the captured snapshot fills the rasterize gap. |
-| `.remountOnInteraction` | Same mount/unmount cadence as `.onInteraction`, but each interaction gives the live body a fresh SwiftUI identity so any `@State` resets. **Required for `MKMapView`** — its tile pipeline goes dormant on detach and does not recover when reattached, so each interaction needs a brand-new `MKMapView` instance. Also useful for any live content whose internal state needs to be reinitialized per interaction. |
-| `.persistent` | The row stays mounted continuously while the node is in viewport. The interaction predicate only toggles `opacity` and hit-testing — the underlying view never detaches. **Required for `WKWebView`** and other views backed by a long-lived helper process whose compositor stalls when the view is detached (e.g. `AVPlayerView`, `PDFView`). |
+| `.onInteraction` *(default)* | The row mounts only while the interaction predicate is true (or while the first snapshot is being warmed). Once interaction ends, the live subtree leaves the view tree and the Canvas rasterize path takes over. Suitable for SwiftUI-only content whose state can be recreated from inputs; the captured snapshot fills the rasterize gap. |
+| `.persistent` | The row stays mounted continuously while the node is present. The interaction predicate only toggles `opacity` and hit-testing — the underlying view never detaches. Required for native views whose renderer, scroll state, or helper process depends on stable view identity, including `WKWebView`, `MKMapView`, `AVPlayerView`, and `PDFView`. |
 
-Why native views split between `.persistent` and `.remountOnInteraction`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the platform's out-of-process renderer, and different frameworks recover from that differently. `WKWebView`'s WebContent process goes dormant on detach but can be coaxed back to life if the same instance is kept mounted across interaction toggles — so `.persistent` works and preserves URL / scroll / JS state for free. `MKMapView`'s tile pipeline also goes dormant on detach, but reattaching the same instance does **not** reliably wake the `CAMetalLayer` pipeline, so each interaction must get a fresh `MKMapView` (under `.remountOnInteraction`) plus app-layer region persistence to keep pan/zoom across remount cycles.
+Native views should generally use `.persistent`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the platform renderer, remote layer, or helper process. Keeping the same view instance mounted preserves URL / scroll / JS state for `WKWebView`, region and tile-renderer state for `MKMapView`, and playback / document state for media or document views. The overlay still hides the live view and disables hit testing while idle, so the Canvas snapshot remains the visible poster.
 
-The cost of `.persistent` is that the helper process keeps running while the node is in viewport even when the user is not interacting with it. The cost of `.remountOnInteraction` is that the live view's `@State` is rebuilt on each interaction. Pick the policy that matches the framework's lifecycle, and leave SwiftUI-only `LiveNode`s on the default `.onInteraction`.
+The cost of `.persistent` is that the live subtree keeps its renderer alive even when the user is not interacting with it. Leave SwiftUI-only `LiveNode`s on the default `.onInteraction`; use `.persistent` when preserving native view identity is more important than minimizing idle work.
 
 The Poster pattern is unchanged by mount policy: while the node is not interactive the Canvas always draws the stored `FlowNodeSnapshot` regardless of whether the live subtree is mounted underneath. `.persistent` only controls visibility, not whether the snapshot is shown.
 

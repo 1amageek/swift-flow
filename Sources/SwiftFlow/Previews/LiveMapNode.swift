@@ -4,8 +4,6 @@ import SwiftUI
 import MapKit
 import CoreLocation
 
-private let isolatesLiveMapNodeFromLiveNodeProcessing = false
-
 // MARK: - State Store
 
 /// Per-node region cache for ``LiveMapNode``.
@@ -77,8 +75,9 @@ struct LiveMapNodeDiagnostics: Sendable, Hashable {
 ///   interaction-end pipeline writes a fresh snapshot before the overlay
 ///   fades.
 /// - The coordinator additionally pushes a one-shot bootstrap snapshot
-///   500 ms after the first interaction kick so the poster is non-empty
-///   before the user hovers out for the first time.
+///   after MapKit reports a fully rendered pass, with a delayed fallback
+///   after the first interaction kick so the poster is non-empty before
+///   the user hovers out for the first time.
 /// - Region persistence is read/write through the user-supplied
 ///   ``LiveMapNodeStateStore`` so pan/zoom survives real teardown.
 /// - Tile pipeline kick: window-attach callback + non-zero bounds polling
@@ -239,8 +238,9 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
 
     /// Snapshot channel injected by ``LiveMapRepresentable`` from
     /// `\.liveNodeSnapshotContext`. The coordinator uses it to push a
-    /// bootstrap snapshot 500 ms after the interaction kick so the poster
-    /// has a real frame before the user hovers out for the first time.
+    /// bootstrap snapshot after MapKit reports a fully rendered pass, with
+    /// a delayed fallback after the interaction kick so the poster has a
+    /// real frame before the user hovers out for the first time.
     var snapshotContext: LiveNodeSnapshotContext?
 
     /// Only flipped to `true` after a real-size `setRegion` has actually
@@ -596,7 +596,7 @@ struct LiveMapRepresentable: UIViewRepresentable {
 
     func makeUIView(context: Context) -> MKMapView {
         let coordinator = context.coordinator
-        coordinator.snapshotContext = isolatesLiveMapNodeFromLiveNodeProcessing ? nil : snapshotContext
+        coordinator.snapshotContext = snapshotContext
 
         let mapView = LiveMapNodeMapView()
         mapView.debugNodeID = nodeID
@@ -609,24 +609,16 @@ struct LiveMapRepresentable: UIViewRepresentable {
 
         mapView.onWindowAttach = { [weak coordinator] view in
             coordinator?.logMapState("windowAttach", mapView: view)
-            if isolatesLiveMapNodeFromLiveNodeProcessing {
-                LiveNodeDebugLog.log("map.liveNodeProcessing.disabled node=\(nodeID) action=windowAttachKick")
-            } else {
-                coordinator?.kickIfReady(view)
-            }
+            coordinator?.kickIfReady(view)
         }
 
-        if isolatesLiveMapNodeFromLiveNodeProcessing {
-            LiveNodeDebugLog.log("map.liveNodeProcessing.disabled node=\(nodeID) action=registerCapture")
-        } else {
-            // Register the interaction-end capture handler with the surrounding
-            // LiveNode. The handler captures `mapView` weakly, so it always
-            // reads from the current native view if SwiftUI recreates the
-            // representable for unrelated tree changes.
-            snapshotContext?.registerCapture { [weak mapView] in
-                guard let mapView else { return nil }
-                return await mapView.makeLiveMapNodeSnapshot()
-            }
+        // Register the interaction-end capture handler with the surrounding
+        // LiveNode. The handler captures `mapView` weakly, so it always
+        // reads from the current native view if SwiftUI recreates the
+        // representable for unrelated tree changes.
+        snapshotContext?.registerCapture { [weak mapView] in
+            guard let mapView else { return nil }
+            return await mapView.makeLiveMapNodeSnapshot()
         }
 
         return mapView
@@ -634,14 +626,10 @@ struct LiveMapRepresentable: UIViewRepresentable {
 
     func updateUIView(_ mapView: MKMapView, context: Context) {
         let coordinator = context.coordinator
-        coordinator.snapshotContext = isolatesLiveMapNodeFromLiveNodeProcessing ? nil : snapshotContext
+        coordinator.snapshotContext = snapshotContext
         mapView.layer.cornerRadius = cornerRadius
         coordinator.logMapState("updateUIView.beforeInteraction", mapView: mapView)
-        if isolatesLiveMapNodeFromLiveNodeProcessing {
-            LiveNodeDebugLog.log("map.liveNodeProcessing.disabled node=\(nodeID) action=updateInteractionState value=\(isInteractive)")
-        } else {
-            coordinator.updateInteractionState(isInteractive, mapView: mapView)
-        }
+        coordinator.updateInteractionState(isInteractive, mapView: mapView)
     }
 
     static func dismantleUIView(_ mapView: MKMapView, coordinator: LiveMapNodeCoordinator) {
@@ -685,7 +673,7 @@ struct LiveMapRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MKMapView {
         let coordinator = context.coordinator
-        coordinator.snapshotContext = isolatesLiveMapNodeFromLiveNodeProcessing ? nil : snapshotContext
+        coordinator.snapshotContext = snapshotContext
 
         let mapView = LiveMapNodeMapView()
         mapView.debugNodeID = nodeID
@@ -699,24 +687,16 @@ struct LiveMapRepresentable: NSViewRepresentable {
 
         mapView.onWindowAttach = { [weak coordinator] view in
             coordinator?.logMapState("windowAttach", mapView: view)
-            if isolatesLiveMapNodeFromLiveNodeProcessing {
-                LiveNodeDebugLog.log("map.liveNodeProcessing.disabled node=\(nodeID) action=windowAttachKick")
-            } else {
-                coordinator?.kickIfReady(view)
-            }
+            coordinator?.kickIfReady(view)
         }
 
-        if isolatesLiveMapNodeFromLiveNodeProcessing {
-            LiveNodeDebugLog.log("map.liveNodeProcessing.disabled node=\(nodeID) action=registerCapture")
-        } else {
-            // Register the interaction-end capture handler with the surrounding
-            // LiveNode. The handler captures `mapView` weakly, so it always
-            // reads from the current native view if SwiftUI recreates the
-            // representable for unrelated tree changes.
-            snapshotContext?.registerCapture { [weak mapView] in
-                guard let mapView else { return nil }
-                return await mapView.makeLiveMapNodeSnapshot()
-            }
+        // Register the interaction-end capture handler with the surrounding
+        // LiveNode. The handler captures `mapView` weakly, so it always
+        // reads from the current native view if SwiftUI recreates the
+        // representable for unrelated tree changes.
+        snapshotContext?.registerCapture { [weak mapView] in
+            guard let mapView else { return nil }
+            return await mapView.makeLiveMapNodeSnapshot()
         }
 
         return mapView
@@ -724,14 +704,10 @@ struct LiveMapRepresentable: NSViewRepresentable {
 
     func updateNSView(_ mapView: MKMapView, context: Context) {
         let coordinator = context.coordinator
-        coordinator.snapshotContext = isolatesLiveMapNodeFromLiveNodeProcessing ? nil : snapshotContext
+        coordinator.snapshotContext = snapshotContext
         mapView.layer?.cornerRadius = cornerRadius
         coordinator.logMapState("updateNSView.beforeInteraction", mapView: mapView)
-        if isolatesLiveMapNodeFromLiveNodeProcessing {
-            LiveNodeDebugLog.log("map.liveNodeProcessing.disabled node=\(nodeID) action=updateInteractionState value=\(isInteractive)")
-        } else {
-            coordinator.updateInteractionState(isInteractive, mapView: mapView)
-        }
+        coordinator.updateInteractionState(isInteractive, mapView: mapView)
     }
 
     static func dismantleNSView(_ mapView: MKMapView, coordinator: LiveMapNodeCoordinator) {

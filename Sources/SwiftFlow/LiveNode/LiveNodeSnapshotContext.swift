@@ -13,15 +13,16 @@ import SwiftUI
 ///
 /// Three things the context lets a descendant do:
 ///
-/// - ``write(_:)`` — push a snapshot directly. Use after a navigation
-///   completes (`WKWebView`) or a tile pass lands (`MKMapView`).
+/// - ``write(_:)`` — push a snapshot directly when immediate writes are
+///   allowed. During active node interaction this becomes a no-op so native
+///   render events do not update the poster under the user's pointer.
 /// - ``registerCapture(_:)`` — install an async capture handler that
 ///   `LiveNode` invokes during the interaction-end pipeline (and via
 ///   ``requestCapture()``). The handler typically reads from the live
 ///   native view weakly and produces a `FlowNodeSnapshot`.
-/// - ``requestCapture()`` — explicitly drive a capture pass on demand,
-///   e.g. 500 ms after first attach so the poster has a real frame
-///   before the user ever hovers out.
+/// - ``requestCapture()`` — explicitly drive a capture pass on demand when
+///   immediate writes are allowed, e.g. after first attach so the poster has
+///   a real frame before the user ever hovers out.
 ///
 /// The context is `nil` when a `LiveNode` is rendered outside a
 /// `FlowCanvas` (rasterize-only previews) — there is nowhere to deposit
@@ -35,6 +36,7 @@ public struct LiveNodeSnapshotContext: Sendable {
         @escaping @MainActor () async -> FlowNodeSnapshot?
     ) -> Void
     let _unregisterCapture: @MainActor @Sendable () -> Void
+    let _allowsImmediateSnapshotWrites: @MainActor @Sendable () -> Bool
     let _requestCapture: @MainActor @Sendable () async -> Void
 
     public init(
@@ -44,17 +46,29 @@ public struct LiveNodeSnapshotContext: Sendable {
             @escaping @MainActor () async -> FlowNodeSnapshot?
         ) -> Void,
         unregisterCapture: @escaping @MainActor @Sendable () -> Void,
+        allowsImmediateSnapshotWrites: @escaping @MainActor @Sendable () -> Bool = { true },
         requestCapture: @escaping @MainActor @Sendable () async -> Void
     ) {
         self.nodeID = nodeID
         self._write = write
         self._registerCapture = registerCapture
         self._unregisterCapture = unregisterCapture
+        self._allowsImmediateSnapshotWrites = allowsImmediateSnapshotWrites
         self._requestCapture = requestCapture
     }
 
     @MainActor
+    public var allowsImmediateSnapshotWrites: Bool {
+        _allowsImmediateSnapshotWrites()
+    }
+
+    @MainActor
     public func write(_ snapshot: FlowNodeSnapshot) {
+        guard allowsImmediateSnapshotWrites else {
+            LiveNodeDebugLog.log("snapshot.write skipped node=\(nodeID) reason=deferred")
+            return
+        }
+        LiveNodeDebugLog.log("snapshot.write committed node=\(nodeID)")
         _write(snapshot)
     }
 
@@ -72,6 +86,11 @@ public struct LiveNodeSnapshotContext: Sendable {
 
     @MainActor
     public func requestCapture() async {
+        guard allowsImmediateSnapshotWrites else {
+            LiveNodeDebugLog.log("snapshot.requestCapture skipped node=\(nodeID) reason=deferred")
+            return
+        }
+        LiveNodeDebugLog.log("snapshot.requestCapture started node=\(nodeID)")
         await _requestCapture()
     }
 }

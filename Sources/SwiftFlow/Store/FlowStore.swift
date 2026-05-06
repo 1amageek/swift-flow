@@ -772,8 +772,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     // MARK: - Hover
 
-    public func setHoveredNode(_ nodeID: String?) {
+    public func setHoveredNode(_ nodeID: String?, source: String = "unknown") {
         guard hoveredNodeID != nodeID else { return }
+        LiveNodeDebugLog.log("hover.changed source=\(source) previous=\(hoveredNodeID ?? "nil") next=\(nodeID ?? "nil")")
         if let oldID = hoveredNodeID,
            let index = nodes.firstIndex(where: { $0.id == oldID }) {
             nodes[index].isHovered = false

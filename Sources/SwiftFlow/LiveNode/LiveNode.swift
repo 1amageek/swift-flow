@@ -154,11 +154,12 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     @Environment(\.self) private var swiftUIEnvironment
     @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
     @Environment(\.liveNodeInteractionCoordinator) private var coordinator
+    @Environment(\.defersLiveNodeSnapshotWrites) private var defersSnapshotWrites
 
     @State private var nativeCapture = LiveNodeNativeCaptureRegistry()
     @State private var remountGeneration: Int = 0
     @State private var previousInteractiveState: Bool = false
-
+    @State private var hasSeededInitialSnapshot: Bool = false
     private var contentContext: LiveNodeContentContext {
         LiveNodeContentContext(
             id: environment.id,
@@ -203,6 +204,7 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
             )
             .task(id: environment.id) {
                 registerInteractionEndCapture()
+                await seedInitialSnapshotIfNeeded()
             }
             .onDisappear {
                 unregisterInteractionEndCapture()
@@ -213,12 +215,17 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     private func handleInteractiveStateChange(_ isNowInteractive: Bool) {
         defer { previousInteractiveState = isNowInteractive }
 
+        LiveNodeDebugLog.log(
+            "interactive.changed node=\(environment.id) previous=\(previousInteractiveState) next=\(isNowInteractive) mount=\(configuration.mountPolicy)"
+        )
+
         guard isNowInteractive, previousInteractiveState == false else {
             return
         }
 
         if configuration.mountPolicy == .remountOnInteraction {
             remountGeneration += 1
+            LiveNodeDebugLog.log("remount.generation node=\(environment.id) generation=\(remountGeneration)")
         }
     }
 
@@ -235,9 +242,42 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     }
 
     @MainActor
+    private func seedInitialSnapshotIfNeeded() async {
+        guard configuration.mountPolicy == .onInteraction else { return }
+        guard environment.snapshot == nil else { return }
+        guard !hasSeededInitialSnapshot else { return }
+        guard !defersSnapshotWrites else { return }
+        hasSeededInitialSnapshot = true
+
+        do {
+            try await Task.sleep(nanoseconds: 16_000_000)
+        } catch {
+            return
+        }
+        guard !Task.isCancelled else { return }
+        guard environment.snapshot == nil else { return }
+
+        LiveNodeDebugLog.log("initialSnapshot.seed node=\(environment.id)")
+        await captureNow()
+    }
+
+    @MainActor
     private func captureNow() async {
         guard let snapshotWriter else { return }
-        guard let snapshot = await produceSnapshot() else { return }
+        guard !Task.isCancelled else {
+            LiveNodeDebugLog.log("captureNow.skipped node=\(environment.id) reason=cancelled-before")
+            return
+        }
+        LiveNodeDebugLog.log("captureNow.started node=\(environment.id)")
+        guard let snapshot = await produceSnapshot() else {
+            LiveNodeDebugLog.log("captureNow.empty node=\(environment.id)")
+            return
+        }
+        guard !Task.isCancelled else {
+            LiveNodeDebugLog.log("captureNow.skipped node=\(environment.id) reason=cancelled-after-produce")
+            return
+        }
+        LiveNodeDebugLog.log("captureNow.write node=\(environment.id)")
         snapshotWriter(environment.id, snapshot)
     }
 
@@ -276,20 +316,39 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
         guard let snapshotWriter else { return nil }
         let nodeID = environment.id
         let registry = nativeCapture
+        let allowsImmediateSnapshotWrites = !defersSnapshotWrites
         return LiveNodeSnapshotContext(
             nodeID: nodeID,
             write: { snapshot in
+                LiveNodeDebugLog.log("snapshotWriter.direct node=\(nodeID)")
                 snapshotWriter(nodeID, snapshot)
             },
             registerCapture: { handler in
+                LiveNodeDebugLog.log("nativeCapture.register node=\(nodeID)")
                 registry.handler = handler
             },
             unregisterCapture: {
+                LiveNodeDebugLog.log("nativeCapture.unregister node=\(nodeID)")
                 registry.handler = nil
+            },
+            allowsImmediateSnapshotWrites: {
+                allowsImmediateSnapshotWrites
             },
             requestCapture: {
                 guard let handler = registry.handler else { return }
-                guard let snapshot = await handler() else { return }
+                guard !Task.isCancelled else {
+                    LiveNodeDebugLog.log("snapshot.requestCapture.cancelled node=\(nodeID) stage=before")
+                    return
+                }
+                guard let snapshot = await handler() else {
+                    LiveNodeDebugLog.log("snapshot.requestCapture.empty node=\(nodeID)")
+                    return
+                }
+                guard !Task.isCancelled else {
+                    LiveNodeDebugLog.log("snapshot.requestCapture.cancelled node=\(nodeID) stage=after")
+                    return
+                }
+                LiveNodeDebugLog.log("snapshot.requestCapture.write node=\(nodeID)")
                 snapshotWriter(nodeID, snapshot)
             }
         )

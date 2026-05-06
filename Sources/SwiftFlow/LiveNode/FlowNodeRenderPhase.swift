@@ -50,6 +50,10 @@ private struct IsFlowNodeFocusedKey: EnvironmentKey {
     static let defaultValue: Bool = false
 }
 
+private struct DefersLiveNodeSnapshotWritesKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
 extension EnvironmentValues {
     /// Which dual-phase rendering pass is currently evaluating a
     /// `nodeContent` closure. See ``FlowNodeRenderPhase`` for the
@@ -195,5 +199,14 @@ extension EnvironmentValues {
     public var isFlowNodeFocused: Bool {
         get { self[IsFlowNodeFocusedKey.self] }
         set { self[IsFlowNodeFocusedKey.self] = newValue }
+    }
+
+    /// `true` while direct snapshot writes should stay out of the user's
+    /// interaction path. Interaction-end capture is still allowed: it is
+    /// driven by ``LiveNodeInteractionCoordinator`` after the raw hover /
+    /// selection intent has ended, and is cancelled if that intent returns.
+    var defersLiveNodeSnapshotWrites: Bool {
+        get { self[DefersLiveNodeSnapshotWritesKey.self] }
+        set { self[DefersLiveNodeSnapshotWritesKey.self] = newValue }
     }
 }

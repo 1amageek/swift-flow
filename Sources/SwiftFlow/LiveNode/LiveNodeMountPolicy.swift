@@ -20,13 +20,13 @@ public enum LiveNodeMountPolicy: Sendable, Hashable {
     /// Keep the live subtree mounted while the node is present.
     ///
     /// Useful for views that are expensive or fragile to remount,
-    /// especially `WKWebView` — its WebContent process goes dormant when
-    /// the view detaches and does not reliably wake on reattach.
+    /// especially native renderers such as `WKWebView` and `MKMapView`.
+    /// Keeping their view identity avoids detach/reattach side effects.
     case persistent
 
     /// Recreate the live subtree every time the node becomes interactive.
     ///
-    /// Useful for views whose renderer may not recover cleanly after
-    /// leaving interaction, especially `MKMapView`.
+    /// Useful only for views that need a fresh native identity on every
+    /// interaction cycle.
     case remountOnInteraction
 }

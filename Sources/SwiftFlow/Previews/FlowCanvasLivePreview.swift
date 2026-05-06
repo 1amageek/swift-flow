@@ -202,6 +202,7 @@ private final class WebNodeCoordinator: NSObject, WKNavigationDelegate {
             } catch {
                 return
             }
+            guard self?.snapshotContext?.allowsImmediateSnapshotWrites == true else { return }
             guard let snapshot = await webView.makeFlowNodeSnapshot() else { return }
             self?.snapshotContext?.write(snapshot)
         }
@@ -393,6 +394,15 @@ private struct WebNodeView: View {
 
 // MARK: - Live preview view
 
+public struct FlowCanvasLiveDemoView: View {
+
+    public init() {}
+
+    public var body: some View {
+        LiveFlowPreview()
+    }
+}
+
 private struct LiveFlowPreview: View {
 
     @State private var mapStateStore = LiveMapNodeStateStore()
@@ -400,14 +410,8 @@ private struct LiveFlowPreview: View {
         FlowStore<LivePreviewData>(
             nodes: [
                 FlowNode(
-                    id: "apple",
-                    position: CGPoint(x: 60, y: 80),
-                    size: CGSize(width: 360, height: 240),
-                    data: .web(url: URL(string: "https://www.apple.com")!, title: "apple.com")
-                ),
-                FlowNode(
                     id: "developer",
-                    position: CGPoint(x: 520, y: 80),
+                    position: CGPoint(x: 60, y: 80),
                     size: CGSize(width: 360, height: 240),
                     data: .web(url: URL(string: "https://developer.apple.com")!, title: "developer.apple.com")
                 ),
@@ -418,23 +422,15 @@ private struct LiveFlowPreview: View {
                     data: .map(latitude: 35.6812, longitude: 139.7671, title: "Tokyo Station")
                 ),
                 FlowNode(
-                    id: "kyoto",
-                    position: CGPoint(x: 520, y: 400),
-                    size: CGSize(width: 360, height: 240),
-                    data: .map(latitude: 35.0116, longitude: 135.7681, title: "Kyoto")
-                ),
-                FlowNode(
                     id: "scratch",
-                    position: CGPoint(x: 980, y: 240),
+                    position: CGPoint(x: 520, y: 240),
                     size: CGSize(width: 220, height: 140),
                     data: .resizable(title: "Resize Me", color: "orange")
                 ),
             ],
             edges: [
-                FlowEdge(id: "e1", sourceNodeID: "apple", sourceHandleID: "source", targetNodeID: "developer", targetHandleID: "target"),
-                FlowEdge(id: "e2", sourceNodeID: "tokyo", sourceHandleID: "source", targetNodeID: "kyoto", targetHandleID: "target"),
-                FlowEdge(id: "e3", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "scratch", targetHandleID: "target"),
-                FlowEdge(id: "e4", sourceNodeID: "kyoto", sourceHandleID: "source", targetNodeID: "scratch", targetHandleID: "target"),
+                FlowEdge(id: "e1", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "tokyo", targetHandleID: "target"),
+                FlowEdge(id: "e2", sourceNodeID: "tokyo", sourceHandleID: "source", targetNodeID: "scratch", targetHandleID: "target"),
             ]
         )
     }()
@@ -461,8 +457,6 @@ private struct LiveFlowPreview: View {
                 Text("Hover or select a node to switch from snapshot to its live view.")
                 Text("Drag from the header strip — flowDragHandle(for:in:) routes the drag through FlowStore, so the WKWebView / MKMapView body keeps its own scroll/pan.")
                     .foregroundStyle(.secondary)
-                Text("Web nodes mount as .persistent and push snapshots via \\.liveNodeSnapshotContext; map nodes use .remountOnInteraction.")
-                    .foregroundStyle(.secondary)
                 Text("Select the orange node and drag a corner handle to resize.")
                     .foregroundStyle(.secondary)
             }
@@ -470,6 +464,13 @@ private struct LiveFlowPreview: View {
             .padding(10)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
             .padding(12)
+
+            LiveMapLifecycleDiagnosticsPanel(
+                diagnostics: mapStateStore.diagnostics(for: "tokyo")
+            )
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .allowsHitTesting(false)
         }
     }
 
@@ -483,6 +484,39 @@ private struct LiveFlowPreview: View {
         )
     }
 
+}
+
+private struct LiveMapLifecycleDiagnosticsPanel: View {
+
+    let diagnostics: LiveMapNodeDiagnostics
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Map lifecycle")
+                .font(.caption.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
+                row("node", diagnostics.nodeID)
+                row("mapID", diagnostics.mapID)
+                row("make", "\(diagnostics.makeCount)")
+                row("dismantle", "\(diagnostics.dismantleCount)")
+            }
+            Divider()
+            Text("Persistent check: make=1, dismantle=0, stable mapID")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption.monospaced())
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+        }
+    }
 }
 
 /// Node body for the Live preview.
@@ -673,7 +707,7 @@ private struct LivePreviewSelectionShadow: ViewModifier {
 }
 
 #Preview("FlowCanvas - Live") {
-    LiveFlowPreview()
+    FlowCanvasLiveDemoView()
         .frame(minWidth: 1200, minHeight: 800)
 }
 

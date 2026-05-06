@@ -226,6 +226,7 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                 let isSelected = store.selectedNodeIDs.contains(node.id)
                 let isHovered = store.hoveredNodeID == node.id
                 let isFocused = store.focusedTarget == .node(node.id)
+                let defersSnapshotWrites = intent || isViewportInteracting
                 LiveNodeOverlayRow(
                     node: node,
                     viewport: viewport,
@@ -238,9 +239,17 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                     shouldShow: displayInteractive && !isViewportInteracting,
                     isHittable: displayInteractive && !isViewportInteracting,
                     isViewportInteracting: isViewportInteracting,
+                    defersSnapshotWrites: defersSnapshotWrites,
                     mountPolicy: mountPolicy,
                     renderContext: renderContext(node),
                     nodeContent: nodeContent,
+                    setOverlayHover: { nodeID in
+                        LiveNodeDebugLog.log("overlay.hover.active node=\(nodeID)")
+                        store.setHoveredNode(nodeID, source: "overlay.hover.active")
+                    },
+                    clearOverlayHover: { nodeID in
+                        LiveNodeDebugLog.log("overlay.hover.ended ignored node=\(nodeID) current=\(store.hoveredNodeID ?? "nil")")
+                    },
                     selectNodeForDirectInteraction: { nodeID in
                         if store.selectedNodeIDs.contains(nodeID) {
                             store.focusNode(nodeID)
@@ -325,9 +334,12 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     /// never consulted.
     let isHittable: Bool
     let isViewportInteracting: Bool
+    let defersSnapshotWrites: Bool
     let mountPolicy: LiveNodeMountPolicy
     let renderContext: NodeRenderContext
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
+    let setOverlayHover: (String) -> Void
+    let clearOverlayHover: (String) -> Void
     let selectNodeForDirectInteraction: (String) -> Void
 
     /// Mount decision depends on the per-node mount policy:
@@ -416,6 +428,7 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                 .environment(\.isFlowNodeSelected, isSelected)
                 .environment(\.isFlowNodeHovered, isHovered)
                 .environment(\.isFlowNodeFocused, isFocused)
+                .environment(\.defersLiveNodeSnapshotWrites, defersSnapshotWrites)
                 .environment(
                     \.liveNodeEnvironment,
                     LiveNodeEnvironment(
@@ -435,6 +448,26 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                 )
                 .opacity(effectiveVisible ? 1 : 0)
                 .allowsHitTesting(effectiveHittable)
+                .onAppear {
+                    LiveNodeDebugLog.log(
+                        "overlay.mount node=\(node.id) visible=\(effectiveVisible) interactive=\(effectiveInteractive) hittable=\(effectiveHittable) warming=\(isWarmingUp) deferred=\(defersSnapshotWrites) snapshot=\(renderContext.snapshot != nil)"
+                    )
+                }
+                .onDisappear {
+                    LiveNodeDebugLog.log("overlay.unmount node=\(node.id)")
+                }
+                .onChange(of: effectiveVisible) { _, newValue in
+                    LiveNodeDebugLog.log("overlay.visible node=\(node.id) value=\(newValue)")
+                }
+                .onChange(of: effectiveInteractive) { _, newValue in
+                    LiveNodeDebugLog.log("overlay.interactive node=\(node.id) value=\(newValue)")
+                }
+                .onChange(of: effectiveHittable) { _, newValue in
+                    LiveNodeDebugLog.log("overlay.hittable node=\(node.id) value=\(newValue)")
+                }
+                .onChange(of: defersSnapshotWrites) { _, newValue in
+                    LiveNodeDebugLog.log("overlay.deferSnapshotWrites node=\(node.id) value=\(newValue)")
+                }
                 .simultaneousGesture(
                     TapGesture()
                         .onEnded {
@@ -442,8 +475,38 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                             selectNodeForDirectInteraction(node.id)
                         }
                 )
+                .liveNodeOverlayHoverTracking(
+                    nodeID: node.id,
+                    setHover: setOverlayHover,
+                    clearHover: clearOverlayHover
+                )
         } else {
             Color.clear.frame(width: 0, height: 0)
         }
+    }
+}
+
+private extension View {
+
+    @ViewBuilder
+    func liveNodeOverlayHoverTracking(
+        nodeID: String,
+        setHover: @escaping (String) -> Void,
+        clearHover: @escaping (String) -> Void
+    ) -> some View {
+        #if os(macOS)
+        self.onContinuousHover { phase in
+            switch phase {
+            case .active:
+                setHover(nodeID)
+            case .ended:
+                clearHover(nodeID)
+            @unknown default:
+                break
+            }
+        }
+        #else
+        self
+        #endif
     }
 }

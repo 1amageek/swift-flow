@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -190,7 +191,7 @@ public struct FlowCanvas<
                     target = .canvas
                 }
 
-                storeRef.setHoveredNode(nodeID)
+                storeRef.setHoveredNode(nodeID, source: "drop.updated")
 
                 let accepted = action(.updated(providers, canvasPoint, target))
                 storeRef.setDropTargetNode(accepted ? nodeID : nil)
@@ -198,7 +199,7 @@ public struct FlowCanvas<
                 return accepted
 
             case .exited:
-                storeRef.setHoveredNode(nil)
+                storeRef.setHoveredNode(nil, source: "drop.exited")
                 storeRef.setDropTargetNode(nil)
                 storeRef.setDropTargetEdge(nil)
                 _ = action(.exited)
@@ -351,6 +352,7 @@ public struct FlowCanvas<
         let hasAccessory = nodeAccessoryBuilder != nil || edgeAccessoryBuilder != nil
         let snapshotGeneration = store.currentSnapshotGeneration()
         let snapshotWriter: @MainActor (String, FlowNodeSnapshot) -> Void = { [store] id, snap in
+            LiveNodeDebugLog.log("canvas.snapshotWriter node=\(id) generation=\(snapshotGeneration)")
             store.setNodeSnapshot(snap, for: id, generation: snapshotGeneration)
         }
         #if os(macOS)
@@ -378,7 +380,24 @@ public struct FlowCanvas<
 
                 let canvasPoint = store.viewport.screenToCanvas(location)
                 let nodeID = store.hitTestNode(at: canvasPoint)
-                store.setHoveredNode(nodeID)
+                let previousNodeID = store.hoveredNodeID
+                let previousFrame = previousNodeID.flatMap { store.nodeLookup[$0]?.frame }
+                let previousContainsPoint = previousFrame?.contains(canvasPoint) ?? false
+                if let previousNodeID,
+                   liveNodeInteractionCoordinator.isRenderedInteractive(previousNodeID),
+                   previousContainsPoint,
+                   nodeID != previousNodeID {
+                    LiveNodeDebugLog.log(
+                        "canvas.cursorAt hoverChange ignored node=\(previousNodeID) hit=\(nodeID ?? "nil") reason=renderedInteractiveContainsPointer location=\(debugPoint(location)) canvas=\(debugPoint(canvasPoint)) previousFrame=\(debugRect(previousFrame)) hitFrame=\(debugRect(nodeID.flatMap { store.nodeLookup[$0]?.frame })) zoom=\(debugScalar(store.viewport.zoom)) offset=\(debugPoint(store.viewport.offset))"
+                    )
+                    return .arrow
+                }
+                if nodeID != previousNodeID {
+                    LiveNodeDebugLog.log(
+                        "canvas.cursorAt decision previous=\(previousNodeID ?? "nil") hit=\(nodeID ?? "nil") previousRendered=\(previousNodeID.map { liveNodeInteractionCoordinator.isRenderedInteractive($0) } ?? false) hitRendered=\(nodeID.map { liveNodeInteractionCoordinator.isRenderedInteractive($0) } ?? false) location=\(debugPoint(location)) canvas=\(debugPoint(canvasPoint)) previousContains=\(previousContainsPoint) hitContains=\(nodeID.flatMap { store.nodeLookup[$0]?.frame.contains(canvasPoint) } ?? false) previousFrame=\(debugRect(previousFrame)) hitFrame=\(debugRect(nodeID.flatMap { store.nodeLookup[$0]?.frame })) zoom=\(debugScalar(store.viewport.zoom)) offset=\(debugPoint(store.viewport.offset))"
+                    )
+                }
+                store.setHoveredNode(nodeID, source: "canvas.cursorAt")
 
                 if store.hitTestHandle(at: canvasPoint) != nil {
                     return .crosshair
@@ -391,7 +410,8 @@ public struct FlowCanvas<
                 return .arrow
             },
             onMouseExited: {
-                store.setHoveredNode(nil)
+                LiveNodeDebugLog.log("canvas.hoverExit clear")
+                store.setHoveredNode(nil, source: "canvas.mouseExited")
             },
             registeredDropTypes: registeredDropTypes,
             onDrop: dropHandler,
@@ -443,9 +463,9 @@ public struct FlowCanvas<
             switch phase {
             case .active(let location):
                 let canvasPoint = store.viewport.screenToCanvas(location)
-                store.setHoveredNode(store.hitTestNode(at: canvasPoint))
+                store.setHoveredNode(store.hitTestNode(at: canvasPoint), source: "canvas.hover.active")
             case .ended:
-                store.setHoveredNode(nil)
+                store.setHoveredNode(nil, source: "canvas.hover.ended")
             @unknown default:
                 break
             }
@@ -1078,6 +1098,19 @@ public struct FlowCanvas<
         let transform = CGAffineTransform(scaleX: viewport.zoom, y: viewport.zoom)
             .concatenating(CGAffineTransform(translationX: viewport.offset.x, y: viewport.offset.y))
         return Path(path.cgPath.copy(using: [transform]) ?? path.cgPath)
+    }
+
+    private func debugPoint(_ point: CGPoint) -> String {
+        "(\(debugScalar(point.x)), \(debugScalar(point.y)))"
+    }
+
+    private func debugRect(_ rect: CGRect?) -> String {
+        guard let rect else { return "nil" }
+        return "(x: \(debugScalar(rect.origin.x)), y: \(debugScalar(rect.origin.y)), w: \(debugScalar(rect.size.width)), h: \(debugScalar(rect.size.height)))"
+    }
+
+    private func debugScalar(_ value: CGFloat) -> String {
+        String(format: "%.3f", Double(value))
     }
 
     private func nodeRenderContext(for node: FlowNode<NodeData>) -> NodeRenderContext {

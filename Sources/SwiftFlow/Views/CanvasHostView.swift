@@ -32,7 +32,8 @@ struct CanvasHostView<Content: View>: NSViewRepresentable {
         hostView.onDrop = onDrop
         hostView.onKeyDown = onKeyDown
         hostView.updateRegisteredTypes(registeredDropTypes)
-        let hosting = NSHostingView(rootView: content)
+        let hosting = CanvasNSHostingView(rootView: content)
+        hosting.eventSink = hostView
         hosting.translatesAutoresizingMaskIntoConstraints = false
         hostView.addSubview(hosting)
         NSLayoutConstraint.activate([
@@ -120,12 +121,24 @@ final class CanvasNSHostView<Content: View>: NSView {
 
     override func mouseExited(with event: NSEvent) {
         NSCursor.arrow.set()
+        guard !isMouseInsideBounds() else {
+            LiveNodeDebugLog.log("canvasHost.mouseExited ignored reason=still-inside")
+            return
+        }
         MainActor.assumeIsolated {
             onMouseExited?()
         }
     }
 
     override func scrollWheel(with event: NSEvent) {
+        handleScrollWheel(event)
+    }
+
+    override func magnify(with event: NSEvent) {
+        handleMagnify(event)
+    }
+
+    func handleScrollWheel(_ event: NSEvent) {
         let dx: CGFloat
         let dy: CGFloat
         if event.hasPreciseScrollingDeltas {
@@ -141,7 +154,7 @@ final class CanvasNSHostView<Content: View>: NSView {
         }
     }
 
-    override func magnify(with event: NSEvent) {
+    func handleMagnify(_ event: NSEvent) {
         let location = flippedLocation(from: event)
         MainActor.assumeIsolated {
             onMagnify?(event.magnification, location)
@@ -201,6 +214,12 @@ final class CanvasNSHostView<Content: View>: NSView {
         return CGPoint(x: location.x, y: bounds.height - location.y)
     }
 
+    private func isMouseInsideBounds() -> Bool {
+        guard let window else { return false }
+        let location = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return bounds.contains(location)
+    }
+
     private func flippedLocation(from sender: any NSDraggingInfo) -> CGPoint {
         let location = convert(sender.draggingLocation, from: nil)
         return CGPoint(x: location.x, y: bounds.height - location.y)
@@ -228,6 +247,27 @@ final class CanvasNSHostView<Content: View>: NSView {
             }
         }
         return provider.registeredTypeIdentifiers.isEmpty ? [] : [provider]
+    }
+}
+
+final class CanvasNSHostingView<Content: View>: NSHostingView<Content> {
+
+    weak var eventSink: CanvasNSHostView<Content>?
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let eventSink else {
+            super.scrollWheel(with: event)
+            return
+        }
+        eventSink.handleScrollWheel(event)
+    }
+
+    override func magnify(with event: NSEvent) {
+        guard let eventSink else {
+            super.magnify(with: event)
+            return
+        }
+        eventSink.handleMagnify(event)
     }
 }
 #endif

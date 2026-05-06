@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// View modifier that turns its host view into a drag handle for a
 /// specific `FlowNode`, dispatching through the same `FlowStore` session
@@ -32,20 +35,21 @@ struct FlowDragHandleModifier<Data: Sendable & Hashable>: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            #if os(macOS)
+            .overlay {
+                FlowCommandTapOverlay {
+                    store.selectNodeFromPointer(nodeID, mode: .toggle)
+                }
+            }
+            #endif
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
                         if !sessionActive {
-                            if FlowSelectionModifier.isAdditiveSelectionActive,
-                               !store.selectedNodeIDs.contains(nodeID) {
-                                store.selectNode(nodeID, exclusive: false)
-                            } else if store.selectedNodeIDs.contains(nodeID) {
-                                store.focusNode(nodeID)
-                            } else {
-                                store.selectNode(nodeID)
+                            if FlowSelectionModifier.isAdditiveSelectionActive {
+                                return
                             }
-                            store.beginNodeDrag(nodeID)
-                            guard store.isNodeDragging else { return }
+                            guard store.beginNodeDragFromPointer(nodeID, mode: .replace) else { return }
                             sessionActive = true
                         }
                         store.updateNodeDrag(translation: value.translation)
@@ -58,6 +62,44 @@ struct FlowDragHandleModifier<Data: Sendable & Hashable>: ViewModifier {
             )
     }
 }
+
+#if os(macOS)
+private struct FlowCommandTapOverlay: NSViewRepresentable {
+
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> CommandTapView {
+        let view = CommandTapView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ nsView: CommandTapView, context: Context) {
+        nsView.action = action
+    }
+
+    final class CommandTapView: NSView {
+
+        var action: (() -> Void)?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = window?.currentEvent ?? NSApp.currentEvent,
+                  event.modifierFlags.contains(.command) else {
+                return nil
+            }
+            return bounds.contains(point) ? self : nil
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            guard event.modifierFlags.contains(.command) else {
+                super.mouseDown(with: event)
+                return
+            }
+            action?()
+        }
+    }
+}
+#endif
 
 public extension View {
 

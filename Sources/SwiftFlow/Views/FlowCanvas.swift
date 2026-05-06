@@ -920,34 +920,14 @@ public struct FlowCanvas<
         }
 
         // Perform single-tap action immediately (no delay)
+        let selectionMode: FlowSelectionMode = isAdditive ? .toggle : .replace
         switch currentTarget {
         case .node(let nodeID):
-            store.focusNode(nodeID)
-            if isAdditive {
-                if store.selectedNodeIDs.contains(nodeID) {
-                    store.deselectNode(nodeID)
-                } else {
-                    store.selectNode(nodeID, exclusive: false)
-                }
-            } else {
-                store.selectNode(nodeID)
-            }
+            store.selectNodeFromPointer(nodeID, mode: selectionMode)
         case .edge(let edgeID):
-            store.focusEdge(edgeID)
-            if isAdditive {
-                if store.selectedEdgeIDs.contains(edgeID) {
-                    store.deselectEdge(edgeID)
-                } else {
-                    store.selectEdge(edgeID, exclusive: false)
-                }
-            } else {
-                store.selectEdge(edgeID)
-            }
+            store.selectEdgeFromPointer(edgeID, mode: selectionMode)
         case .canvas, .none:
-            if !isAdditive {
-                store.clearSelection()
-                store.clearFocus()
-            }
+            store.selectCanvasFromPointer(mode: selectionMode)
         }
 
         // Double-tap detection

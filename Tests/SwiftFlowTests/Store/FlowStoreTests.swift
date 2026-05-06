@@ -123,6 +123,61 @@ struct FlowStoreTests {
         #expect(store.focusedTarget == nil)
     }
 
+    @Test("Pointer node selection toggles and replaces consistently")
+    func pointerNodeSelection() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 100, y: 0), data: "B"))
+
+        store.selectNodeFromPointer("n1", mode: .toggle)
+        #expect(store.selectedNodeIDs == Set(["n1"]))
+
+        store.selectNodeFromPointer("n2", mode: .toggle)
+        #expect(store.selectedNodeIDs == Set(["n1", "n2"]))
+
+        store.selectNodeFromPointer("n1", mode: .toggle)
+        #expect(store.selectedNodeIDs == Set(["n2"]))
+
+        store.selectNodeFromPointer("n1", mode: .replace)
+        #expect(store.selectedNodeIDs == Set(["n1"]))
+        #expect(store.focusedTarget == .node("n1"))
+    }
+
+    @Test("Pointer edge selection toggles and replaces consistently")
+    func pointerEdgeSelection() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.addNode(FlowNode(id: "n3", position: CGPoint(x: 400, y: 0), data: "C"))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
+        store.addEdge(FlowEdge(id: "e2", sourceNodeID: "n2", targetNodeID: "n3"))
+
+        store.selectEdgeFromPointer("e1", mode: .toggle)
+        store.selectEdgeFromPointer("e2", mode: .toggle)
+        #expect(store.selectedEdgeIDs == Set(["e1", "e2"]))
+
+        store.selectEdgeFromPointer("e1", mode: .toggle)
+        #expect(store.selectedEdgeIDs == Set(["e2"]))
+
+        store.selectEdgeFromPointer("e1", mode: .replace)
+        #expect(store.selectedEdgeIDs == Set(["e1"]))
+        #expect(store.focusedTarget == .edge("e1"))
+    }
+
+    @Test("Pointer canvas selection clears only in replace mode")
+    func pointerCanvasSelection() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.selectNodeFromPointer("n1", mode: .replace)
+
+        store.selectCanvasFromPointer(mode: .toggle)
+        #expect(store.selectedNodeIDs == Set(["n1"]))
+
+        store.selectCanvasFromPointer(mode: .replace)
+        #expect(store.selectedNodeIDs.isEmpty)
+        #expect(store.focusedTarget == nil)
+    }
+
     @Test("Focus ignores missing targets and clears explicitly")
     func focusLifecycle() {
         let store = FlowStore<String>()

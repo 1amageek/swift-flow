@@ -610,7 +610,8 @@ private struct LivePreviewNodeBody: View {
 
     @ViewBuilder
     private func dragHandleHeader() -> some View {
-        let isActiveWindow = store.focusedTarget == .node(node.id)
+        let isActiveWindow = store.selectedNodeIDs.contains(node.id)
+            || store.focusedTarget == .node(node.id)
         let headerBackground = isActiveWindow
             ? node.data.headerColor.opacity(0.9)
             : Color.gray.opacity(0.72)

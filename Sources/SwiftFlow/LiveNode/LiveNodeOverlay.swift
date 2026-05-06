@@ -250,17 +250,8 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                         LiveNodeDebugLog.log("overlay.hover.ended ignored node=\(nodeID) current=\(store.hoveredNodeID ?? "nil")")
                     },
                     selectNodeForDirectInteraction: { nodeID, isAdditive in
-                        if isAdditive {
-                            if store.selectedNodeIDs.contains(nodeID) {
-                                store.deselectNode(nodeID)
-                            } else {
-                                store.selectNode(nodeID, exclusive: false)
-                            }
-                        } else if store.selectedNodeIDs.contains(nodeID) {
-                            store.focusNode(nodeID)
-                        } else {
-                            store.selectNode(nodeID)
-                        }
+                        let mode: FlowSelectionMode = isAdditive ? .toggle : .replace
+                        store.selectNodeFromPointer(nodeID, mode: mode)
                     }
                 )
                 .onChange(of: intent, initial: true) { _, newIntent in
@@ -476,9 +467,10 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                     TapGesture()
                         .onEnded {
                             guard effectiveHittable else { return }
+                            guard !FlowSelectionModifier.isAdditiveSelectionActive else { return }
                             selectNodeForDirectInteraction(
                                 node.id,
-                                FlowSelectionModifier.isAdditiveSelectionActive
+                                false
                             )
                         }
                 )

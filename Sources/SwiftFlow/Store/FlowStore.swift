@@ -669,6 +669,53 @@ public final class FlowStore<Data: Sendable & Hashable> {
         if !edgeChanges.isEmpty { onEdgesChange?(edgeChanges) }
     }
 
+    public func selectNodeFromPointer(_ nodeID: String, mode: FlowSelectionMode) {
+        switch mode {
+        case .replace:
+            selectNode(nodeID)
+        case .toggle:
+            if selectedNodeIDs.contains(nodeID) {
+                deselectNode(nodeID)
+            } else {
+                selectNode(nodeID, exclusive: false)
+            }
+        }
+    }
+
+    public func selectEdgeFromPointer(_ edgeID: String, mode: FlowSelectionMode) {
+        switch mode {
+        case .replace:
+            selectEdge(edgeID)
+        case .toggle:
+            if selectedEdgeIDs.contains(edgeID) {
+                deselectEdge(edgeID)
+            } else {
+                selectEdge(edgeID, exclusive: false)
+            }
+        }
+    }
+
+    public func selectCanvasFromPointer(mode: FlowSelectionMode) {
+        switch mode {
+        case .replace:
+            clearSelection()
+            clearFocus()
+        case .toggle:
+            break
+        }
+    }
+
+    public func beginNodeDragFromPointer(_ nodeID: String, mode: FlowSelectionMode) -> Bool {
+        guard mode == .replace else { return false }
+        if selectedNodeIDs.contains(nodeID) {
+            focusNode(nodeID)
+        } else {
+            selectNode(nodeID)
+        }
+        beginNodeDrag(nodeID)
+        return isNodeDragging
+    }
+
     public func selectNodesInRect(_ rect: SelectionRect) {
         selectInRect(rect)
     }

@@ -6,7 +6,7 @@ import SwiftUI
 /// `FlowCanvas` injects `\.flowNodeRenderPhase` so that `LiveNode` can
 /// decide what to return: a cached snapshot (or a placeholder) when the
 /// Canvas is rasterizing, versus the real live content when the overlay
-/// layer evaluates the same closure for an active node.
+/// layer evaluates the same closure for an interactive node.
 ///
 /// Apps typically don't need to read this directly — `LiveNode` handles
 /// the branching. It's exposed so that callers hosting Metal-backed
@@ -14,7 +14,7 @@ import SwiftUI
 /// that create offscreen compositing groups (`.clipShape`, `.shadow`,
 /// `.drawingGroup`) **only** in the rasterize pass — those modifiers
 /// break Metal drawable compositing on the live pass. See
-/// ``EnvironmentValues/isFlowNodeActive`` for a worked example.
+/// ``EnvironmentValues/isFlowNodeInteractive`` for a worked example.
 public enum FlowNodeRenderPhase: Sendable, Hashable {
     /// The Canvas is drawing a snapshot of this node (either the cached
     /// image or its placeholder). Safe to apply any SwiftUI modifier —
@@ -34,7 +34,19 @@ private struct FlowNodeIDKey: EnvironmentKey {
     static let defaultValue: String? = nil
 }
 
-private struct IsFlowNodeActiveKey: EnvironmentKey {
+private struct IsFlowNodeInteractiveKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+private struct IsFlowNodeSelectedKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+private struct IsFlowNodeHoveredKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+private struct IsFlowNodeFocusedKey: EnvironmentKey {
     static let defaultValue: Bool = false
 }
 
@@ -53,32 +65,41 @@ extension EnvironmentValues {
     }
 
     /// `true` while the SwiftFlow live overlay considers the enclosing
-    /// node active — i.e. the activation predicate returns `true` for it.
+    /// node interactive — i.e. the interaction predicate returns `true`
+    /// for it, or the node is warming up its first snapshot.
+    ///
+    /// This is intentionally distinct from selection. The default
+    /// interaction predicate treats a hovered node as interactive so native
+    /// content can receive scroll and pointer events like a macOS window
+    /// under the cursor, even when the node is not selected. Use
+    /// ``EnvironmentValues/isFlowNodeSelected`` and
+    /// ``EnvironmentValues/isFlowNodeFocused`` for selection and keyboard
+    /// routing.
     ///
     /// Injected by `LiveNodeOverlay` so downstream SwiftUI views (including
     /// `UIViewRepresentable` / `NSViewRepresentable` wrappers around native
     /// views such as `WKWebView`, `MKMapView`, or `AVPlayerView`) can react
-    /// to activation changes without a separate binding. Typical use is to
+    /// to interaction changes without a separate binding. Typical use is to
     /// suspend expensive work while the node is hidden:
     ///
     /// ```swift
     /// struct WebNodeRepresentable: UIViewRepresentable {
-    ///     @Environment(\.isFlowNodeActive) private var isActive
+    ///     @Environment(\.isFlowNodeInteractive) private var isInteractive
     ///     func updateUIView(_ view: WKWebView, context: Context) {
-    ///         if isActive { view.resumeAllMediaPlayback() }
+    ///         if isInteractive { view.resumeAllMediaPlayback() }
     ///         else { view.pauseAllMediaPlayback() }
     ///     }
     /// }
     /// ```
     ///
-    /// The subtree stays mounted across activation toggles so WebView /
+    /// The subtree stays mounted across interaction toggles so WebView /
     /// player state survives; this flag is how apps opt in to pausing
     /// their own internal loops while the overlay is hidden.
     ///
-    /// ## Kick-on-activation for Metal-backed views
+    /// ## Kick-on-interaction for Metal-backed views
     ///
     /// Inactive nodes are mounted in the overlay at `opacity(0)` so that
-    /// their native view identity is preserved across activation toggles.
+    /// their native view identity is preserved across interaction toggles.
     /// Most native views (`WKWebView`, `AVPlayerView`) keep their internal
     /// rendering loops alive in this state and light up instantly once
     /// opacity flips back to 1. **Metal-backed views that gate their draw
@@ -89,22 +110,22 @@ extension EnvironmentValues {
     /// sees blank content until something nudges it.
     ///
     /// Representables wrapping such views should watch for the false → true
-    /// edge of `isFlowNodeActive` (via a coordinator that remembers the
+    /// edge of `isFlowNodeInteractive` (via a coordinator that remembers the
     /// last value) and force a fresh render pass. For `MKMapView` the
     /// canonical kick is a layout followed by re-applying the current
     /// region, which reissues tile requests:
     ///
     /// ```swift
     /// struct MapNodeRepresentable: UIViewRepresentable {
-    ///     @Environment(\.isFlowNodeActive) private var isActive
+    ///     @Environment(\.isFlowNodeInteractive) private var isInteractive
     ///
-    ///     final class Coordinator { var wasActive = false }
+    ///     final class Coordinator { var wasInteractive = false }
     ///     func makeCoordinator() -> Coordinator { Coordinator() }
     ///
     ///     func updateUIView(_ mv: MKMapView, context: Context) {
-    ///         let didActivate = isActive && !context.coordinator.wasActive
-    ///         context.coordinator.wasActive = isActive
-    ///         guard didActivate else { return }
+    ///         let didInteract = isInteractive && !context.coordinator.wasInteractive
+    ///         context.coordinator.wasInteractive = isInteractive
+    ///         guard didInteract else { return }
     ///         mv.setNeedsLayout()
     ///         mv.layoutIfNeeded()
     ///         mv.setRegion(mv.region, animated: false)
@@ -142,8 +163,37 @@ extension EnvironmentValues {
     ///     }
     /// }
     /// ```
-    public var isFlowNodeActive: Bool {
-        get { self[IsFlowNodeActiveKey.self] }
-        set { self[IsFlowNodeActiveKey.self] = newValue }
+    public var isFlowNodeInteractive: Bool {
+        get { self[IsFlowNodeInteractiveKey.self] }
+        set { self[IsFlowNodeInteractiveKey.self] = newValue }
+    }
+
+    /// `true` when the enclosing flow node is selected in ``FlowStore``.
+    ///
+    /// This models selection separately from ``isFlowNodeInteractive`` and
+    /// ``isFlowNodeFocused``. Live content may be scrollable on hover while
+    /// this value remains `false`, matching macOS window behavior.
+    public var isFlowNodeSelected: Bool {
+        get { self[IsFlowNodeSelectedKey.self] }
+        set { self[IsFlowNodeSelectedKey.self] = newValue }
+    }
+
+    /// `true` when the pointer is currently over the enclosing flow node.
+    ///
+    /// This is useful for hover-only affordances that should not imply
+    /// selection.
+    public var isFlowNodeHovered: Bool {
+        get { self[IsFlowNodeHoveredKey.self] }
+        set { self[IsFlowNodeHoveredKey.self] = newValue }
+    }
+
+    /// `true` when keyboard-directed flow actions target the enclosing node.
+    ///
+    /// Focus is separate from selection and hover. A hovered LiveNode may
+    /// receive scroll or pointer events through hit testing while focus remains
+    /// elsewhere.
+    public var isFlowNodeFocused: Bool {
+        get { self[IsFlowNodeFocusedKey.self] }
+        set { self[IsFlowNodeFocusedKey.self] = newValue }
     }
 }

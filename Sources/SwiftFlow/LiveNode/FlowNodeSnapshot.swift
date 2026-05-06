@@ -5,7 +5,7 @@ import Foundation
 ///
 /// Produced by `LiveNode` (or by the app for `.manual` captures of native
 /// views) and stored in `FlowStore.nodeSnapshots`. The Canvas rasterize
-/// path reads it to avoid an empty frame while the node is inactive.
+/// path reads it to avoid an empty frame while the node is not interactive.
 ///
 /// This is a rendering cache rather than document state: it is not part
 /// of undo/redo and may be regenerated at any time.

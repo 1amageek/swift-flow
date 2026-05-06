@@ -65,23 +65,23 @@ public struct LiveNodeDescriptor: Sendable, Hashable {
 /// Read-only context passed to a `LiveNode` content closure.
 ///
 /// Use the `(LiveNodeContentContext) -> Content` initializer when the
-/// content view needs to react to the node's own activation state — for
-/// example to gate hit testing on `live.isActive`.
+/// content view needs to react to the node's own interaction state — for
+/// example to gate hit testing on `live.isInteractive`.
 public struct LiveNodeContentContext: Sendable, Hashable {
     public let id: String
     public let size: CGSize
     public let snapshot: FlowNodeSnapshot?
-    public let isActive: Bool
+    public let isInteractive: Bool
 
     public init(
         id: String,
         size: CGSize,
         snapshot: FlowNodeSnapshot?,
-        isActive: Bool
+        isInteractive: Bool
     ) {
         self.id = id
         self.size = size
         self.snapshot = snapshot
-        self.isActive = isActive
+        self.isInteractive = isInteractive
     }
 }

@@ -15,7 +15,7 @@ Edges are batch-drawn via `GraphicsContext` for performance. Nodes are rendered 
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.15.0")
+    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.16.0")
 ]
 ```
 
@@ -210,7 +210,7 @@ FlowCanvas(store: store) { node, context in
 
 The default `Canvas` + `resolveSymbol` pipeline rasterizes each node every frame, which is great for pure SwiftUI content but falls apart for `UIViewRepresentable` / `NSViewRepresentable` subtrees — `WKWebView`, `MKMapView`, `AVPlayerView`, SceneKit / RealityKit hosts, etc. Their rendering loops, scroll views, decoders, and input handling require a real SwiftUI view in the tree; a one-shot rasterization leaves them blank, flickering, or frozen on the first frame.
 
-`LiveNode` is a container you declare once inside `nodeContent`. It transparently switches between a **cached snapshot** (drawn by `Canvas` when the node is inactive) and the **real live view** (hosted in a `ZStack` overlay above the `Canvas` when the node is active), from a single call site.
+`LiveNode` is a container you declare once inside `nodeContent`. It transparently switches between a **cached snapshot** (drawn by `Canvas` when the node is not interactive) and the **real live view** (hosted in a `ZStack` overlay above the `Canvas` when the node is interactive), from a single call site.
 
 ### Basic Usage (SwiftUI-only)
 
@@ -227,7 +227,7 @@ FlowCanvas(store: store) { node, ctx in
 }
 ```
 
-For SwiftUI-only content the library re-captures on deactivation using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path stays consistent with the live phase across the active ↔ inactive transition. `LiveNode` sizes itself to `node.size`, so the caller does **not** need to apply a `.frame(...)` matching the node — just compose any handle padding, clipping, shadows, or overlays around it.
+For SwiftUI-only content the library re-captures on interaction end using `ImageRenderer` with the full `EnvironmentValues` inherited, so the rasterize path stays consistent with the live phase across interaction transitions. `LiveNode` sizes itself to `node.size`, so the caller does **not** need to apply a `.frame(...)` matching the node — just compose any handle padding, clipping, shadows, or overlays around it.
 
 `LiveNode` is a phase dispatcher — its only sizing decision is matching `node.size`. Visual treatment (corner radius, the handle-inset padding that keeps handles on the border from being clipped, background, overlays, etc.) is composed with ordinary SwiftUI modifiers around `LiveNode`. Handle drawing is likewise the caller's responsibility: use `FlowNodeHandles(node:context:)` for the library default look, or compose `FlowHandle` views directly for fully custom handles.
 
@@ -238,7 +238,7 @@ For SwiftUI-only content the library re-captures on deactivation using `ImageRen
 | Method on ``LiveNodeSnapshotContext`` | Purpose |
 |---|---|
 | `write(_:)` | Push a snapshot directly — call after a navigation completes (`WKWebView`), a tile pass lands (`MKMapView`), or any other moment the app already has a fresh frame in hand |
-| `registerCapture(_:)` | Install an async capture handler that `LiveNode` invokes during the deactivation pipeline — the handler typically reads from the live native view weakly and produces a `FlowNodeSnapshot` |
+| `registerCapture(_:)` | Install an async capture handler that `LiveNode` invokes during the interaction-end pipeline — the handler typically reads from the live native view weakly and produces a `FlowNodeSnapshot` |
 | `unregisterCapture()` | Clear the handler — call from `dismantleUIView` / `dismantleNSView` so a remount cycle does not leave a stale handler bound to a dead view |
 | `requestCapture()` | Drive a capture pass on demand, e.g. to seed the poster shortly after the view first attaches |
 
@@ -284,7 +284,7 @@ private struct WebRepresentable: UIViewRepresentable {
 }
 ```
 
-For events that produce a fresh frame outside the deactivation pipeline — `WKNavigationDelegate.didFinish`, `MKMapViewDelegate.mapViewDidFinishRenderingMap`, `AVPlayerItem.didPlayToEndTimeNotification` — call `snapshot.write(_:)` from the delegate. That path is independent of the deactivation-triggered capture handler and lets the poster reflect the latest content immediately.
+For events that produce a fresh frame outside the interaction-end pipeline — `WKNavigationDelegate.didFinish`, `MKMapViewDelegate.mapViewDidFinishRenderingMap`, `AVPlayerItem.didPlayToEndTimeNotification` — call `snapshot.write(_:)` from the delegate. That path is independent of the interaction-end-triggered capture handler and lets the poster reflect the latest content immediately.
 
 Snapshot helpers are framework-specific. For `WKWebView`:
 
@@ -299,42 +299,42 @@ extension WKWebView {
 }
 ```
 
-`MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). `MKMapView` additionally needs `mount: .remountOnActivation` rather than `.persistent` — see [Mount Policy](#mount-policy) for why.
+`MKMapView` does not have a one-call snapshot method; use `bitmapImageRepForCachingDisplay(in:)` (macOS) or `UIGraphicsImageRenderer.image { drawHierarchy(in:afterScreenUpdates:) }` (iOS). `MKMapView` additionally needs `mount: .remountOnInteraction` rather than `.persistent` — see [Mount Policy](#mount-policy) for why.
 
-When the live content is pure SwiftUI, the representable simply does not register a capture handler. `LiveNode` falls back to `ImageRenderer` to produce the deactivation snapshot.
+When the live content is pure SwiftUI, the representable simply does not register a capture handler. `LiveNode` falls back to `ImageRenderer` to produce the interaction end snapshot.
 
 ### Mount Policy
 
-`LiveNode` accepts a `mount:` argument that controls whether the overlay row hosting the live subtree is allowed to unmount while the node is inactive.
+`LiveNode` accepts a `mount:` argument that controls whether the overlay row hosting the live subtree is allowed to unmount while the node is not interactive.
 
 | `LiveNodeMountPolicy` | Behavior |
 |---|---|
-| `.onActivation` *(default)* | The row mounts only while the activation predicate is true (or while the first snapshot is being warmed). Once the node deactivates, the live subtree leaves the view tree and the Canvas rasterize path takes over. Suitable for SwiftUI-only content — its state rebuilds from scratch on each remount and the captured snapshot fills the rasterize gap. |
-| `.remountOnActivation` | Same mount/unmount cadence as `.onActivation`, but each activation gives the live body a fresh SwiftUI identity so any `@State` resets. **Required for `MKMapView`** — its tile pipeline goes dormant on detach and does not recover when reattached, so each activation needs a brand-new `MKMapView` instance. Also useful for any live content whose internal state needs to be reinitialized per activation. |
-| `.persistent` | The row stays mounted continuously while the node is in viewport. The activation predicate only toggles `opacity` and hit-testing — the underlying view never detaches. **Required for `WKWebView`** and other views backed by a long-lived helper process whose compositor stalls when the view is detached (e.g. `AVPlayerView`, `PDFView`). |
+| `.onInteraction` *(default)* | The row mounts only while the interaction predicate is true (or while the first snapshot is being warmed). Once interaction ends, the live subtree leaves the view tree and the Canvas rasterize path takes over. Suitable for SwiftUI-only content — its state rebuilds from scratch on each remount and the captured snapshot fills the rasterize gap. |
+| `.remountOnInteraction` | Same mount/unmount cadence as `.onInteraction`, but each interaction gives the live body a fresh SwiftUI identity so any `@State` resets. **Required for `MKMapView`** — its tile pipeline goes dormant on detach and does not recover when reattached, so each interaction needs a brand-new `MKMapView` instance. Also useful for any live content whose internal state needs to be reinitialized per interaction. |
+| `.persistent` | The row stays mounted continuously while the node is in viewport. The interaction predicate only toggles `opacity` and hit-testing — the underlying view never detaches. **Required for `WKWebView`** and other views backed by a long-lived helper process whose compositor stalls when the view is detached (e.g. `AVPlayerView`, `PDFView`). |
 
-Why native views split between `.persistent` and `.remountOnActivation`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the platform's out-of-process renderer, and different frameworks recover from that differently. `WKWebView`'s WebContent process goes dormant on detach but can be coaxed back to life if the same instance is kept mounted across activation toggles — so `.persistent` works and preserves URL / scroll / JS state for free. `MKMapView`'s tile pipeline also goes dormant on detach, but reattaching the same instance does **not** reliably wake the `CAMetalLayer` pipeline, so each activation must get a fresh `MKMapView` (under `.remountOnActivation`) plus app-layer region persistence to keep pan/zoom across remount cycles.
+Why native views split between `.persistent` and `.remountOnInteraction`: `removeFromSuperview` propagates `viewDidMoveToWindow(nil)` into the platform's out-of-process renderer, and different frameworks recover from that differently. `WKWebView`'s WebContent process goes dormant on detach but can be coaxed back to life if the same instance is kept mounted across interaction toggles — so `.persistent` works and preserves URL / scroll / JS state for free. `MKMapView`'s tile pipeline also goes dormant on detach, but reattaching the same instance does **not** reliably wake the `CAMetalLayer` pipeline, so each interaction must get a fresh `MKMapView` (under `.remountOnInteraction`) plus app-layer region persistence to keep pan/zoom across remount cycles.
 
-The cost of `.persistent` is that the helper process keeps running while the node is in viewport even when the user is not interacting with it. The cost of `.remountOnActivation` is that the live view's `@State` is rebuilt on each activation. Pick the policy that matches the framework's lifecycle, and leave SwiftUI-only `LiveNode`s on the default `.onActivation`.
+The cost of `.persistent` is that the helper process keeps running while the node is in viewport even when the user is not interacting with it. The cost of `.remountOnInteraction` is that the live view's `@State` is rebuilt on each interaction. Pick the policy that matches the framework's lifecycle, and leave SwiftUI-only `LiveNode`s on the default `.onInteraction`.
 
-The Poster pattern is unchanged by mount policy: while the node is inactive the Canvas always draws the stored `FlowNodeSnapshot` regardless of whether the live subtree is mounted underneath. `.persistent` only controls visibility, not whether the snapshot is shown.
+The Poster pattern is unchanged by mount policy: while the node is not interactive the Canvas always draws the stored `FlowNodeSnapshot` regardless of whether the live subtree is mounted underneath. `.persistent` only controls visibility, not whether the snapshot is shown.
 
-### Activation
+### Interaction vs Selection
 
-By default a node is active when it is selected or hovered. Override with `.liveNodeActivation`:
+By default a node becomes live/interactable when it is selected or hovered. This mirrors macOS windows: a window under the pointer can scroll even when it is not the selected/frontmost window. Override the interaction predicate with `.liveNodeInteraction`:
 
 ```swift
-.liveNodeActivation { node, store in
+.liveNodeInteraction { node, store in
     guard store.connectionDraft == nil else { return false }
     return store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
 }
 ```
 
-With `mountPolicy: .persistent`, the overlay subtree stays mounted across activation toggles so `WKWebView` page state, scroll offset, JS execution, and player state all survive a deactivation — the overlay simply hides via opacity + hit-testing. Apps can pause their own internal loops while the node is hidden by reading the published `\.isFlowNodeActive` environment value:
+With `mountPolicy: .persistent`, the overlay subtree stays mounted across interaction toggles so `WKWebView` page state, scroll offset, JS execution, and player state all survive when interaction ends — the overlay simply hides via opacity + hit-testing. Apps can pause their own internal loops while the node is hidden by reading the published `\.isFlowNodeInteractive` environment value:
 
 ```swift
 struct WebViewRepresentable: UIViewRepresentable {
-    @Environment(\.isFlowNodeActive) private var isActive
+    @Environment(\.isFlowNodeInteractive) private var isInteractive
     let url: URL
 
     func makeUIView(context: Context) -> WKWebView {
@@ -344,7 +344,27 @@ struct WebViewRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ view: WKWebView, context: Context) {
-        isActive ? view.resumeAllMediaPlayback() : view.pauseAllMediaPlayback()
+        isInteractive ? view.resumeAllMediaPlayback() : view.pauseAllMediaPlayback()
+    }
+}
+```
+
+Selection, focus, and hover are published separately for live content that needs keyboard-target styling or hover-only affordances:
+
+```swift
+struct WindowLikeChrome: View {
+    @Environment(\.isFlowNodeSelected) private var isSelected
+    @Environment(\.isFlowNodeFocused) private var isFocused
+    @Environment(\.isFlowNodeHovered) private var isHovered
+
+    var body: some View {
+        Header()
+            .background(isFocused ? Color.accentColor : Color.secondary.opacity(isHovered ? 0.18 : 0.08))
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .frame(height: isSelected ? 2 : 0)
+                    .foregroundStyle(Color.accentColor)
+            }
     }
 }
 ```
@@ -354,7 +374,7 @@ struct WebViewRepresentable: UIViewRepresentable {
 Node drag is single-sourced through `FlowStore`'s session API — `beginNodeDrag(_:)` / `updateNodeDrag(translation:)` / `endNodeDrag()`. `FlowCanvas.primaryDragGesture` and the `flowDragHandle(for:in:)` modifier both call into it, so multi-selection moves, zoom normalization, and undo registration behave identically regardless of where the drag originated. What changes between nodes is whether drag events ever *reach* one of those drag sites.
 
 - **Plain (non-LiveNode) rows.** The overlay row is kept hit-test transparent until a snapshot is captured, so pointer events pass straight through to the Canvas. No extra work is required.
-- **`LiveNode` with non-interactive content** (e.g. a `TimelineView` driving an animation). The content does not consume drags, but the active overlay row is still hit-testable so other gestures could route to it. Mark the live view as pass-through so drags reach the Canvas:
+- **`LiveNode` with non-interactive content** (e.g. a `TimelineView` driving an animation). The content does not consume drags, but the interactive overlay row is still hit-testable so other gestures could route to it. Mark the live view as pass-through so drags reach the Canvas:
 
   ```swift
   LiveNode(node: node) {
@@ -560,10 +580,21 @@ store.updateNodeSize("node-1", size: size)  // resize node
 
 ```swift
 store.beginNodeDrag("node-1")               // capture start positions (expands to selection if applicable)
-store.isNodeDragging                        // true while a session is active
+store.isNodeDragging                        // true while a drag session is in progress
 store.updateNodeDrag(translation: t)        // screen-space translation; zoom is applied internally
 store.endNodeDrag()                         // commit & register a single undo entry
 store.cancelNodeDrag()                      // drop the session without registering undo
+```
+
+### Focus and Active Interaction
+
+SwiftFlow keeps persistent selection, keyboard focus, pointer hover, and short-lived interaction ownership separate:
+
+```swift
+store.selectedNodeIDs                       // persistent edit selection
+store.hoveredNodeID                         // pointer-derived hover
+store.focusedTarget                         // keyboard routing target
+store.activeInteraction                     // current drag/connect/resize/edit owner
 ```
 
 ### Edge Operations

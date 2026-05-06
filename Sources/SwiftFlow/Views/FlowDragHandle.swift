@@ -36,6 +36,11 @@ struct FlowDragHandleModifier<Data: Sendable & Hashable>: ViewModifier {
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
                         if !sessionActive {
+                            if store.selectedNodeIDs.contains(nodeID) {
+                                store.focusNode(nodeID)
+                            } else {
+                                store.selectNode(nodeID)
+                            }
                             store.beginNodeDrag(nodeID)
                             guard store.isNodeDragging else { return }
                             sessionActive = true

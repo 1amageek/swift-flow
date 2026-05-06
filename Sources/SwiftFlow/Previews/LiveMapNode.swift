@@ -7,9 +7,9 @@ import CoreLocation
 
 /// Per-node region cache for ``LiveMapNode``.
 ///
-/// `LiveMapNode` uses ``LiveNodeMountPolicy/remountOnActivation``, which
+/// `LiveMapNode` uses ``LiveNodeMountPolicy/remountOnInteraction``, which
 /// means the underlying `MKMapView` instance is destroyed and recreated
-/// every time the node deactivates and reactivates. Without an external
+/// every time interaction ends and starts again. Without an external
 /// store, the user's pan/zoom state would be lost on each cycle. This
 /// observable store keeps the last-seen region per node ID across
 /// remount cycles.
@@ -29,17 +29,17 @@ final class LiveMapNodeStateStore {
 /// Hides the bookkeeping required to make a native MapView cooperate
 /// with the Poster pattern:
 ///
-/// - Mount policy is ``LiveNodeMountPolicy/remountOnActivation``: MapKit's
-///   tile pipeline does not survive an inactive cycle reliably, so each
-///   activation gets a fresh `MKMapView`.
+/// - Mount policy is ``LiveNodeMountPolicy/remountOnInteraction``: MapKit's
+///   tile pipeline does not survive an interaction cycle reliably, so each
+///   interaction gets a fresh `MKMapView`.
 /// - ``LiveMapRepresentable`` reads `\.liveNodeSnapshotContext` and uses
-///   it to register a deactivation capture handler from `makeUIView` /
+///   it to register an interaction-end capture handler from `makeUIView` /
 ///   `makeNSView`. The handler captures the live `MKMapView` weakly and
 ///   runs while the row is still mounted, so the coordinator's
-///   deactivation pipeline writes a fresh snapshot before the overlay
+///   interaction-end pipeline writes a fresh snapshot before the overlay
 ///   fades.
 /// - The coordinator additionally pushes a one-shot bootstrap snapshot
-///   500 ms after the first activation kick so the poster is non-empty
+///   500 ms after the first interaction kick so the poster is non-empty
 ///   before the user hovers out for the first time.
 /// - Region persistence is read/write through the user-supplied
 ///   ``LiveMapNodeStateStore`` so pan/zoom survives remount cycles.
@@ -65,7 +65,7 @@ struct LiveMapNode<Data>: View where Data: Sendable & Hashable {
     }
 
     var body: some View {
-        LiveNode(node: node, mount: .remountOnActivation) {
+        LiveNode(node: node, mount: .remountOnInteraction) {
             LiveMapRepresentable(
                 nodeID: node.id,
                 initialCoordinate: initialCoordinate,
@@ -120,20 +120,20 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
 
     /// Snapshot channel injected by ``LiveMapRepresentable`` from
     /// `\.liveNodeSnapshotContext`. The coordinator uses it to push a
-    /// bootstrap snapshot 500 ms after the activation kick so the poster
+    /// bootstrap snapshot 500 ms after the interaction kick so the poster
     /// has a real frame before the user hovers out for the first time.
     var snapshotContext: LiveNodeSnapshotContext?
 
     /// Only flipped to `true` after a real-size `setRegion` has actually
-    /// landed. Flipping it earlier would consume the activation edge on a
+    /// landed. Flipping it earlier would consume the interaction edge on a
     /// still-zero-bounds view and leave MapKit's tile pipeline dormant
-    /// forever — `updateActiveState` would never see another false→true.
-    private var wasActive = false
+    /// forever — `updateInteractionState` would never see another false→true.
+    private var wasInteractive = false
 
-    private var activationKickTask: Task<Void, Never>?
+    private var interactionKickTask: Task<Void, Never>?
 
     /// One-shot delayed task that pushes the first real snapshot once the
-    /// activation kick has actually rendered tiles.
+    /// interaction kick has actually rendered tiles.
     private var initialCaptureTask: Task<Void, Never>?
     private var hasRequestedInitialCapture = false
 
@@ -142,47 +142,47 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
         self.stateStore = stateStore
     }
 
-    func updateActiveState(_ isActive: Bool, mapView: MKMapView) {
-        if !isActive {
-            wasActive = false
-            activationKickTask?.cancel()
-            activationKickTask = nil
+    func updateInteractionState(_ isInteractive: Bool, mapView: MKMapView) {
+        if !isInteractive {
+            wasInteractive = false
+            interactionKickTask?.cancel()
+            interactionKickTask = nil
             initialCaptureTask?.cancel()
             initialCaptureTask = nil
             return
         }
 
-        guard !wasActive else { return }
-        guard activationKickTask == nil else { return }
-        scheduleActivationKick(for: mapView)
+        guard !wasInteractive else { return }
+        guard interactionKickTask == nil else { return }
+        scheduleInteractionKick(for: mapView)
     }
 
     /// Forces the map's tile pipeline to wake. Driven by either the
     /// window-attach callback on `LiveMapNodeMapView` or by
-    /// `updateActiveState` for representables that race ahead of the
-    /// window attach. Idempotent via `wasActive`.
+    /// `updateInteractionState` for representables that race ahead of the
+    /// window attach. Idempotent via `wasInteractive`.
     func kickIfReady(_ mapView: MKMapView) {
-        guard !wasActive else { return }
+        guard !wasInteractive else { return }
         guard mapView.window != nil else { return }
-        if activationKickTask == nil {
-            scheduleActivationKick(for: mapView)
+        if interactionKickTask == nil {
+            scheduleInteractionKick(for: mapView)
         }
     }
 
     func tearDown() {
-        activationKickTask?.cancel()
-        activationKickTask = nil
+        interactionKickTask?.cancel()
+        interactionKickTask = nil
         initialCaptureTask?.cancel()
         initialCaptureTask = nil
         hasRequestedInitialCapture = false
-        wasActive = false
+        wasInteractive = false
         snapshotContext?.unregisterCapture()
     }
 
-    private func scheduleActivationKick(for mapView: MKMapView) {
+    private func scheduleInteractionKick(for mapView: MKMapView) {
         let region = stateStore.regions[nodeID] ?? mapView.region
 
-        activationKickTask = Task { @MainActor [weak self, weak mapView] in
+        interactionKickTask = Task { @MainActor [weak self, weak mapView] in
             for _ in 0..<60 {
                 if Task.isCancelled { return }
                 guard let view = mapView else { return }
@@ -206,8 +206,8 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
                     guard let view = mapView else { return }
                     Self.applyRegion(region, on: view)
 
-                    self?.wasActive = true
-                    self?.activationKickTask = nil
+                    self?.wasInteractive = true
+                    self?.interactionKickTask = nil
                     self?.requestInitialCaptureAfterRender(for: view)
                     return
                 }
@@ -219,7 +219,7 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
                 }
             }
 
-            self?.activationKickTask = nil
+            self?.interactionKickTask = nil
         }
     }
 
@@ -268,7 +268,7 @@ final class LiveMapNodeCoordinator: NSObject, MKMapViewDelegate {
 #if os(iOS)
 struct LiveMapRepresentable: UIViewRepresentable {
 
-    @Environment(\.isFlowNodeActive) private var isActive
+    @Environment(\.isFlowNodeInteractive) private var isInteractive
     @Environment(\.liveNodeSnapshotContext) private var snapshotContext
 
     let nodeID: String
@@ -294,10 +294,10 @@ struct LiveMapRepresentable: UIViewRepresentable {
             coordinator?.kickIfReady(view)
         }
 
-        // Register the deactivation capture handler with the surrounding
+        // Register the interaction-end capture handler with the surrounding
         // LiveNode. The handler captures `mapView` weakly, so it always
         // reads from the live MKMapView instance even though
-        // `.remountOnActivation` recreates one per cycle.
+        // `.remountOnInteraction` recreates one per cycle.
         snapshotContext?.registerCapture { [weak mapView] in
             guard let mapView else { return nil }
             return mapView.makeLiveMapNodeSnapshot()
@@ -310,7 +310,7 @@ struct LiveMapRepresentable: UIViewRepresentable {
         let coordinator = context.coordinator
         coordinator.snapshotContext = snapshotContext
         mapView.layer.cornerRadius = cornerRadius
-        coordinator.updateActiveState(isActive, mapView: mapView)
+        coordinator.updateInteractionState(isInteractive, mapView: mapView)
     }
 
     static func dismantleUIView(_ mapView: MKMapView, coordinator: LiveMapNodeCoordinator) {
@@ -331,7 +331,7 @@ struct LiveMapRepresentable: UIViewRepresentable {
 #elseif os(macOS)
 struct LiveMapRepresentable: NSViewRepresentable {
 
-    @Environment(\.isFlowNodeActive) private var isActive
+    @Environment(\.isFlowNodeInteractive) private var isInteractive
     @Environment(\.liveNodeSnapshotContext) private var snapshotContext
 
     let nodeID: String
@@ -358,10 +358,10 @@ struct LiveMapRepresentable: NSViewRepresentable {
             coordinator?.kickIfReady(view)
         }
 
-        // Register the deactivation capture handler with the surrounding
+        // Register the interaction-end capture handler with the surrounding
         // LiveNode. The handler captures `mapView` weakly, so it always
         // reads from the live MKMapView instance even though
-        // `.remountOnActivation` recreates one per cycle.
+        // `.remountOnInteraction` recreates one per cycle.
         snapshotContext?.registerCapture { [weak mapView] in
             guard let mapView else { return nil }
             return mapView.makeLiveMapNodeSnapshot()
@@ -374,7 +374,7 @@ struct LiveMapRepresentable: NSViewRepresentable {
         let coordinator = context.coordinator
         coordinator.snapshotContext = snapshotContext
         mapView.layer?.cornerRadius = cornerRadius
-        coordinator.updateActiveState(isActive, mapView: mapView)
+        coordinator.updateInteractionState(isInteractive, mapView: mapView)
     }
 
     static func dismantleNSView(_ mapView: MKMapView, coordinator: LiveMapNodeCoordinator) {

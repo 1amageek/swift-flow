@@ -122,6 +122,7 @@ private struct ResizeHandleOverlay<Data: Sendable & Hashable>: View {
 
                         if startFrame == nil {
                             startFrame = node.frame
+                            store.beginResizeNodes([nodeID])
                             store.beginInteractiveUpdates()
                         }
 
@@ -149,6 +150,7 @@ private struct ResizeHandleOverlay<Data: Sendable & Hashable>: View {
                         self.startFrame = nil
                         store.endInteractiveUpdates()
                         store.completeResizeNodes(from: [nodeID: startFrame])
+                        store.endResizeNodes()
                     }
             )
     }
@@ -275,7 +277,7 @@ private struct WebNodeRepresentable: UIViewRepresentable {
             webView.load(URLRequest(url: url))
         }
 
-        // Register the deactivation capture handler with the surrounding
+        // Register the interaction-end capture handler with the surrounding
         // LiveNode. The handler captures `webView` weakly so the
         // representable does not extend its lifetime past the View's.
         snapshotContext?.registerCapture { [weak webView] in
@@ -323,7 +325,7 @@ private struct WebNodeRepresentable: NSViewRepresentable {
             webView.load(URLRequest(url: url))
         }
 
-        // Register the deactivation capture handler with the surrounding
+        // Register the interaction-end capture handler with the surrounding
         // LiveNode. The handler captures `webView` weakly so the
         // representable does not extend its lifetime past the View's.
         snapshotContext?.registerCapture { [weak webView] in
@@ -351,7 +353,7 @@ private struct WebNodeRepresentable: NSViewRepresentable {
 
 /// View that owns a stable `WKWebView` instance via `@State`. The
 /// representable reads `\.liveNodeSnapshotContext` from the surrounding
-/// `LiveNode` and uses it for both deactivation capture registration and
+/// `LiveNode` and uses it for both interaction-end capture registration and
 /// post-navigation snapshot pushes — the developer never has to wire a
 /// closure through `LiveNode`'s initializer.
 private struct WebNodeView: View {
@@ -442,7 +444,7 @@ private struct LiveFlowPreview: View {
             FlowCanvas(store: store) { node, context in
                 nodeBody(for: node, context: context)
             }
-            .liveNodeActivation { node, store in
+            .liveNodeInteraction { node, store in
                 store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
             }
             .overlay {
@@ -459,7 +461,7 @@ private struct LiveFlowPreview: View {
                 Text("Hover or select a node to switch from snapshot to its live view.")
                 Text("Drag from the header strip — flowDragHandle(for:in:) routes the drag through FlowStore, so the WKWebView / MKMapView body keeps its own scroll/pan.")
                     .foregroundStyle(.secondary)
-                Text("Web nodes mount as .persistent and push snapshots via \\.liveNodeSnapshotContext; map nodes use .remountOnActivation.")
+                Text("Web nodes mount as .persistent and push snapshots via \\.liveNodeSnapshotContext; map nodes use .remountOnInteraction.")
                     .foregroundStyle(.secondary)
                 Text("Select the orange node and drag a corner handle to resize.")
                     .foregroundStyle(.secondary)
@@ -488,10 +490,12 @@ private struct LiveFlowPreview: View {
 /// `LiveNode(node:)` owns its own content-area frame at `node.size`, so
 /// this body only composes the surrounding chrome (FlowHandle padding,
 /// handle overlay). Modifiers that should apply to both live and
-/// rasterize phases — e.g. `clipShape`, `shadow`, `overlay(...)` — are
-/// attached directly to the `LiveNode` / `LiveMapNode` so they sit on
-/// the outer phase surface and affect both phases uniformly.
+/// rasterize phases — e.g. `clipShape`, selected `shadow`, `overlay(...)`
+/// — are attached directly to the `LiveNode` / `LiveMapNode` so they sit
+/// on the outer phase surface and affect both phases uniformly.
 private struct LivePreviewNodeBody: View {
+
+    private static let headerHeight: CGFloat = 26
 
     let node: FlowNode<LivePreviewData>
     let context: NodeRenderContext
@@ -511,42 +515,72 @@ private struct LivePreviewNodeBody: View {
     @ViewBuilder
     private var nodeView: some View {
         let cornerRadius: CGFloat = 12
+        let contentSize = CGSize(
+            width: node.size.width,
+            height: max(1, node.size.height - Self.headerHeight)
+        )
 
         switch node.data {
         case let .web(url, title):
-            WebNodeView(
-                node: node,
-                url: url,
-                title: title,
-                cornerRadius: cornerRadius
-            )
-            .overlay(alignment: .top) { dragHandleHeader() }
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
+                WebNodeView(
+                    node: contentNode(size: contentSize),
+                    url: url,
+                    title: title,
+                    cornerRadius: 0
+                )
+            }
 
         case let .map(latitude, longitude, _):
-            LiveMapNode(
-                node: node,
-                initialCoordinate: CLLocationCoordinate2D(
-                    latitude: latitude,
-                    longitude: longitude
-                ),
-                stateStore: mapStateStore,
-                cornerRadius: cornerRadius
-            )
-            .overlay(alignment: .top) { dragHandleHeader() }
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
+                LiveMapNode(
+                    node: contentNode(size: contentSize),
+                    initialCoordinate: CLLocationCoordinate2D(
+                        latitude: latitude,
+                        longitude: longitude
+                    ),
+                    stateStore: mapStateStore,
+                    cornerRadius: 0
+                )
+            }
 
         case let .resizable(_, color):
-            resizableBody(color: color)
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-                .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
+                resizableBody(color: color, contentSize: contentSize)
+            }
         }
+    }
+
+    private func contentNode(size: CGSize) -> FlowNode<LivePreviewData> {
+        var contentNode = node
+        contentNode.size = size
+        return contentNode
+    }
+
+    private func windowBody<Content: View>(
+        cornerRadius: CGFloat,
+        contentSize: CGSize,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(spacing: 0) {
+            dragHandleHeader()
+                .frame(width: node.size.width, height: Self.headerHeight)
+
+            content()
+                .frame(width: contentSize.width, height: contentSize.height)
+        }
+        .frame(width: node.size.width, height: node.size.height)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .livePreviewSelectionShadow()
     }
 
     @ViewBuilder
     private func dragHandleHeader() -> some View {
+        let isActiveWindow = store.focusedTarget == .node(node.id)
+        let headerBackground = isActiveWindow
+            ? node.data.headerColor.opacity(0.9)
+            : Color.gray.opacity(0.72)
+
         HStack(spacing: 6) {
             Image(systemName: node.data.headerSymbol)
                 .font(.caption)
@@ -559,16 +593,16 @@ private struct LivePreviewNodeBody: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
-        .background(node.data.headerColor.opacity(0.9))
+        .background(headerBackground)
         .contentShape(Rectangle())
         .flowDragHandle(for: node, in: store)
     }
 
-    private func resizableBody(color colorName: String) -> some View {
+    private func resizableBody(color colorName: String, contentSize: CGSize) -> some View {
         let color = resizableColor(named: colorName)
-        let size = node.size
+        let liveNode = contentNode(size: contentSize)
 
-        return LiveNode(node: node) {
+        return LiveNode(node: liveNode) {
             TimelineView(.animation) { timeline in
                 let time = timeline.date.timeIntervalSinceReferenceDate
 
@@ -576,7 +610,7 @@ private struct LivePreviewNodeBody: View {
                     color.opacity(0.12 + 0.08 * (0.5 + 0.5 * sin(time * 2)))
 
                     VStack(spacing: 4) {
-                        Text("\(Int(size.width)) × \(Int(size.height))")
+                        Text("\(Int(contentSize.width)) × \(Int(contentSize.height))")
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                         Text("Select & drag a corner")
@@ -604,6 +638,37 @@ private struct LivePreviewNodeBody: View {
         case "green":  return .green
         default:       return .gray
         }
+    }
+}
+
+private extension View {
+    func livePreviewSelectionShadow() -> some View {
+        modifier(LivePreviewSelectionShadow())
+    }
+}
+
+private struct LivePreviewSelectionShadow: ViewModifier {
+    @Environment(\.isFlowNodeSelected) private var isSelected
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(
+                        isSelected ? Color.primary.opacity(0.18) : .clear,
+                        lineWidth: isSelected ? 1.5 : 0
+                    )
+            }
+            .shadow(
+                color: .black.opacity(0.15),
+                radius: 6,
+                y: 2
+            )
+            .shadow(
+                color: isSelected ? Color.black.opacity(0.28) : .clear,
+                radius: isSelected ? 14 : 0,
+                y: isSelected ? 7 : 0
+            )
     }
 }
 

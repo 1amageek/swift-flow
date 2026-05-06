@@ -93,14 +93,17 @@ struct FlowStoreTests {
 
         store.selectNode("n1")
         #expect(store.selectedNodeIDs.contains("n1"))
+        #expect(store.focusedTarget == .node("n1"))
         #expect(store.nodes[0].isSelected == true)
 
         store.selectNode("n2")
         #expect(!store.selectedNodeIDs.contains("n1"))
         #expect(store.selectedNodeIDs.contains("n2"))
+        #expect(store.focusedTarget == .node("n2"))
 
         store.deselectNode("n2")
         #expect(store.selectedNodeIDs.isEmpty)
+        #expect(store.focusedTarget == nil)
     }
 
     @Test("Select and deselect edges")
@@ -112,10 +115,35 @@ struct FlowStoreTests {
 
         store.selectEdge("e1")
         #expect(store.selectedEdgeIDs.contains("e1"))
+        #expect(store.focusedTarget == .edge("e1"))
         #expect(store.edges[0].isSelected == true)
 
         store.deselectEdge("e1")
         #expect(store.selectedEdgeIDs.isEmpty)
+        #expect(store.focusedTarget == nil)
+    }
+
+    @Test("Focus ignores missing targets and clears explicitly")
+    func focusLifecycle() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 200, y: 0), data: "B"))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
+
+        store.focusNode("missing")
+        #expect(store.focusedTarget == nil)
+
+        store.focusNode("n1")
+        #expect(store.focusedTarget == .node("n1"))
+
+        store.focusEdge("e1")
+        #expect(store.focusedTarget == .edge("e1"))
+
+        store.focusEdge("missing")
+        #expect(store.focusedTarget == .edge("e1"))
+
+        store.clearFocus()
+        #expect(store.focusedTarget == nil)
     }
 
     @Test("Clear selection")
@@ -788,9 +816,11 @@ struct FlowStoreTests {
         store.beginConnection(nodeID: "n1", handleID: "out", handleType: .source, handlePosition: .right)
         let firstDraft = store.connectionDraft
         #expect(firstDraft != nil)
+        #expect(store.activeInteraction == .connecting(sourceNodeID: "n1", sourceHandleID: "out"))
 
         store.beginConnection(nodeID: "n2", handleID: "in", handleType: .target, handlePosition: .left)
         #expect(store.connectionDraft?.sourceNodeID == "n1")
+        #expect(store.activeInteraction == .connecting(sourceNodeID: "n1", sourceHandleID: "out"))
     }
 
     @Test("Connection draft lifecycle")
@@ -809,6 +839,44 @@ struct FlowStoreTests {
 
         store.cancelConnection()
         #expect(store.connectionDraft == nil)
+        #expect(store.activeInteraction == nil)
+    }
+
+    @Test("Active interaction tracks drag resize and selection rect")
+    func activeInteractionLifecycle() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        store.beginNodeDrag("n1")
+        #expect(store.activeInteraction == .draggingNodes(["n1"]))
+        store.endNodeDrag()
+        #expect(store.activeInteraction == nil)
+
+        store.beginResizeNodes(["n1", "missing"])
+        #expect(store.activeInteraction == .resizingNodes(["n1"]))
+        store.endResizeNodes()
+        #expect(store.activeInteraction == nil)
+
+        store.beginSelectionRect()
+        #expect(store.activeInteraction == .selectingRect)
+        store.endSelectionRect()
+        #expect(store.activeInteraction == nil)
+    }
+
+    @Test("Remove node clears focus and active interaction ownership")
+    func removeNodeClearsFocusAndActiveInteraction() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "n1", position: .zero, data: "A"))
+
+        store.selectNode("n1")
+        store.beginNodeDrag("n1")
+        #expect(store.focusedTarget == .node("n1"))
+        #expect(store.activeInteraction == .draggingNodes(["n1"]))
+
+        store.removeNode("n1")
+        #expect(store.focusedTarget == nil)
+        #expect(store.activeInteraction == nil)
+        #expect(store.isNodeDragging == false)
     }
 
     @Test("FlowNode defaults to normal persistent state")

@@ -7,7 +7,7 @@ import SwiftUI
 public struct LiveNodeConfiguration: Sendable {
     public var mountPolicy: LiveNodeMountPolicy
 
-    public init(mountPolicy: LiveNodeMountPolicy = .onActivation) {
+    public init(mountPolicy: LiveNodeMountPolicy = .onInteraction) {
         self.mountPolicy = mountPolicy
     }
 

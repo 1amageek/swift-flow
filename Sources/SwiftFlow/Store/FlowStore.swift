@@ -13,6 +13,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public var selectedEdgeIDs: Set<String>
     public private(set) var animatedEdgeIDs: Set<String>
     public private(set) var hoveredNodeID: String?
+    public private(set) var focusedTarget: FlowFocusTarget?
+    public private(set) var activeInteraction: FlowActiveInteraction?
     public private(set) var dropTargetNodeID: String?
     public private(set) var dropTargetEdgeID: String?
     public var configuration: FlowConfiguration
@@ -119,6 +121,13 @@ public final class FlowStore<Data: Sendable & Hashable> {
         rebuildSortedNodes()
 
         selectedNodeIDs.remove(nodeID)
+        if focusedTarget == .node(nodeID) {
+            focusedTarget = nil
+        }
+        if nodeDragSession?.startPositions[nodeID] != nil {
+            nodeDragSession = nil
+            clearActiveInteractionIfDragging()
+        }
         if hoveredNodeID == nodeID {
             hoveredNodeID = nil
         }
@@ -127,9 +136,13 @@ public final class FlowStore<Data: Sendable & Hashable> {
         }
         if connectionDraft?.sourceNodeID == nodeID {
             connectionDraft = nil
+            clearActiveInteractionIfConnecting()
         } else if connectionDraft?.targetNodeID == nodeID {
             connectionDraft?.targetNodeID = nil
             connectionDraft?.targetHandleID = nil
+        }
+        if activeInteractionContainsNode(nodeID) {
+            activeInteraction = nil
         }
 
         edges.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
@@ -138,6 +151,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
         for edge in cascadedEdges {
             selectedEdgeIDs.remove(edge.id)
             animatedEdgeIDs.remove(edge.id)
+            if focusedTarget == .edge(edge.id) {
+                focusedTarget = nil
+            }
         }
 
         emitNodeChange(.remove(nodeID: nodeID))
@@ -269,6 +285,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     public func beginNodeDrag(_ nodeID: String) {
         guard let node = nodeLookup[nodeID], node.isDraggable else {
             nodeDragSession = nil
+            clearActiveInteractionIfDragging()
             return
         }
         var startPositions: [String: CGPoint] = [:]
@@ -282,6 +299,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
             startPositions[nodeID] = node.position
         }
         nodeDragSession = NodeDragSession(startPositions: startPositions)
+        activeInteraction = .draggingNodes(Set(startPositions.keys))
     }
 
     /// Update the active session with a screen-space translation. The
@@ -307,6 +325,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         guard let session = nodeDragSession else { return }
         completeMoveNodes(from: session.startPositions)
         nodeDragSession = nil
+        clearActiveInteractionIfDragging()
     }
 
     /// Drop the active session without registering undo. Intended for
@@ -314,6 +333,36 @@ public final class FlowStore<Data: Sendable & Hashable> {
     /// gesture's normal end path should call ``endNodeDrag()`` instead.
     public func cancelNodeDrag() {
         nodeDragSession = nil
+        clearActiveInteractionIfDragging()
+    }
+
+    /// Mark a node-resize operation as the current interaction owner.
+    public func beginResizeNodes(_ nodeIDs: Set<String>) {
+        let existingNodeIDs = Set(nodeIDs.filter { nodeLookup[$0] != nil })
+        guard !existingNodeIDs.isEmpty else {
+            clearActiveInteractionIfResizing()
+            return
+        }
+        activeInteraction = .resizingNodes(existingNodeIDs)
+    }
+
+    /// Clear the current resize operation if resize owns interaction.
+    public func endResizeNodes() {
+        clearActiveInteractionIfResizing()
+    }
+
+    /// Mark a node's text editing surface as the current interaction owner.
+    public func beginTextEditing(nodeID: String) {
+        guard nodeLookup[nodeID] != nil else { return }
+        focusedTarget = .node(nodeID)
+        activeInteraction = .editingText(nodeID: nodeID)
+    }
+
+    /// Clear text editing ownership. Passing an id only clears matching edits.
+    public func endTextEditing(nodeID: String? = nil) {
+        guard case .editingText(let editingNodeID) = activeInteraction else { return }
+        if let nodeID, editingNodeID != nodeID { return }
+        activeInteraction = nil
     }
 
     // MARK: - Resize Completion (Undo)
@@ -433,6 +482,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
         selectedEdgeIDs.remove(edgeID)
         animatedEdgeIDs.remove(edgeID)
+        if focusedTarget == .edge(edgeID) {
+            focusedTarget = nil
+        }
 
         onEdgesChange?([.remove(edgeID: edgeID)])
 
@@ -552,6 +604,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
             clearSelection()
         }
         selectedNodeIDs.insert(nodeID)
+        focusedTarget = .node(nodeID)
         nodes[index].isSelected = true
         nodeLookup[nodeID] = nodes[index]
         emitNodeChange(.select(nodeID: nodeID, isSelected: true))
@@ -559,6 +612,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     public func deselectNode(_ nodeID: String) {
         selectedNodeIDs.remove(nodeID)
+        if focusedTarget == .node(nodeID) {
+            focusedTarget = nil
+        }
         if let index = nodes.firstIndex(where: { $0.id == nodeID }) {
             nodes[index].isSelected = false
             nodeLookup[nodeID] = nodes[index]
@@ -573,12 +629,16 @@ public final class FlowStore<Data: Sendable & Hashable> {
             clearSelection()
         }
         selectedEdgeIDs.insert(edgeID)
+        focusedTarget = .edge(edgeID)
         edges[index].isSelected = true
         onEdgesChange?([.select(edgeID: edgeID, isSelected: true)])
     }
 
     public func deselectEdge(_ edgeID: String) {
         selectedEdgeIDs.remove(edgeID)
+        if focusedTarget == .edge(edgeID) {
+            focusedTarget = nil
+        }
         if let index = edges.firstIndex(where: { $0.id == edgeID }) {
             edges[index].isSelected = false
             onEdgesChange?([.select(edgeID: edgeID, isSelected: false)])
@@ -654,6 +714,39 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
         if !nodeChanges.isEmpty { emitNodeChanges(nodeChanges) }
         if !edgeChanges.isEmpty { onEdgesChange?(edgeChanges) }
+    }
+
+    // MARK: - Focus
+
+    public func focusNode(_ nodeID: String) {
+        guard nodeLookup[nodeID] != nil else { return }
+        focusedTarget = .node(nodeID)
+    }
+
+    public func focusEdge(_ edgeID: String) {
+        guard edges.contains(where: { $0.id == edgeID }) else { return }
+        focusedTarget = .edge(edgeID)
+    }
+
+    public func clearFocus() {
+        focusedTarget = nil
+    }
+
+    // MARK: - Selection Rect Interaction
+
+    func beginSelectionRect() {
+        activeInteraction = .selectingRect
+    }
+
+    func updateSelectionRect(_ rect: SelectionRect) {
+        selectionRect = rect
+    }
+
+    func endSelectionRect() {
+        selectionRect = nil
+        if case .selectingRect = activeInteraction {
+            activeInteraction = nil
+        }
     }
 
     private func edgeIntersectsRect(_ edge: FlowEdge, rect: CGRect) -> Bool {
@@ -1014,6 +1107,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
             targetHandleID: nil,
             currentPoint: .zero
         )
+        activeInteraction = .connecting(sourceNodeID: nodeID, sourceHandleID: handleID)
     }
 
     func updateConnection(to point: CGPoint, targetNodeID: String? = nil, targetHandleID: String? = nil) {
@@ -1047,10 +1141,12 @@ public final class FlowStore<Data: Sendable & Hashable> {
             onConnectionRejected?(proposal)
         }
         connectionDraft = nil
+        clearActiveInteractionIfConnecting()
     }
 
     func cancelConnection() {
         connectionDraft = nil
+        clearActiveInteractionIfConnecting()
     }
 
     // MARK: - Handle Info (computed from HandleDeclaration)
@@ -1381,6 +1477,8 @@ extension FlowStore where Data: Codable {
         self.selectedEdgeIDs = []
         self.animatedEdgeIDs = []
         self.hoveredNodeID = nil
+        self.focusedTarget = nil
+        self.activeInteraction = nil
         self.dropTargetNodeID = nil
         self.dropTargetEdgeID = nil
         self.connectionDraft = nil
@@ -1408,4 +1506,37 @@ extension FlowStore where Data: Codable {
 /// by `endNodeDrag()` to register a single multi-node undo entry.
 struct NodeDragSession: Sendable {
     let startPositions: [String: CGPoint]
+}
+
+private extension FlowStore {
+    func clearActiveInteractionIfDragging() {
+        if case .draggingNodes = activeInteraction {
+            activeInteraction = nil
+        }
+    }
+
+    func clearActiveInteractionIfConnecting() {
+        if case .connecting = activeInteraction {
+            activeInteraction = nil
+        }
+    }
+
+    func clearActiveInteractionIfResizing() {
+        if case .resizingNodes = activeInteraction {
+            activeInteraction = nil
+        }
+    }
+
+    func activeInteractionContainsNode(_ nodeID: String) -> Bool {
+        switch activeInteraction {
+        case .draggingNodes(let ids), .resizingNodes(let ids):
+            return ids.contains(nodeID)
+        case .connecting(let sourceNodeID, _):
+            return sourceNodeID == nodeID
+        case .editingText(let editingNodeID):
+            return editingNodeID == nodeID
+        case .selectingRect, .none:
+            return false
+        }
+    }
 }

@@ -17,7 +17,7 @@ public struct FlowCanvas<
     private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
     private var accessoryAnimation: Animation? = .spring(duration: 0.25, bounce: 0.05)
-    private var liveNodeActivationPredicate: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool = { node, store in
+    private var liveNodeInteractionPredicate: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool = { node, store in
         store.selectedNodeIDs.contains(node.id) || store.hoveredNodeID == node.id
     }
     private var registeredDropTypes: [String] = []
@@ -133,20 +133,25 @@ public struct FlowCanvas<
         return copy
     }
 
-    // MARK: - Live Node Activation
+    // MARK: - Live Node Interaction
 
-    /// Overrides the predicate that decides which nodes are active for the
-    /// live overlay layer.
+    /// Overrides the predicate that decides which nodes are interactive in
+    /// the live overlay layer.
     ///
     /// The default predicate returns `true` when the node is selected or
-    /// hovered. Apps that want a different policy (e.g., keep a node live
-    /// while a media player is playing, or suspend live rendering during a
+    /// hovered. This mirrors macOS window behavior: a LiveNode can receive
+    /// scroll and pointer events while hovered even if it is not selected.
+    /// Selection and keyboard focus are exposed separately through
+    /// `\.isFlowNodeSelected` and `\.isFlowNodeFocused`.
+    ///
+    /// Apps that want a different policy (e.g., keep a node live while a
+    /// media player is playing, or suspend live rendering during a
     /// connection draft) should supply their own.
-    public func liveNodeActivation(
-        _ isActive: @escaping (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool
+    public func liveNodeInteraction(
+        _ isInteractive: @escaping (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool
     ) -> FlowCanvas {
         var copy = self
-        copy.liveNodeActivationPredicate = isActive
+        copy.liveNodeInteractionPredicate = isInteractive
         return copy
     }
 
@@ -236,13 +241,13 @@ public struct FlowCanvas<
 
     @State private var doubleTapDetector = DoubleTapDetector()
 
-    // MARK: - Live Node Activation Coordinator
+    // MARK: - Live Node Interaction Coordinator
 
-    /// Owns the two-phase deactivation state shared by `LiveNode`
+    /// Owns the two-phase deinteraction state shared by `LiveNode`
     /// (registers capture handlers), `LiveNodeOverlay` (reads
-    /// `renderedActive` for opacity/hit testing), and `drawNodes` (skips
+    /// `renderedInteractive` for opacity/hit testing), and `drawNodes` (skips
     /// drawing nodes whose live overlay is covering them).
-    @State private var liveNodeActivationCoordinator = LiveNodeActivationCoordinator()
+    @State private var liveNodeInteractionCoordinator = LiveNodeInteractionCoordinator()
 
     // MARK: - Viewport Interaction
 
@@ -284,6 +289,9 @@ public struct FlowCanvas<
                 nodeContentBuilder(node, context)
                     .environment(\.flowNodeRenderPhase, .rasterize)
                     .environment(\.flowNodeID, node.id)
+                    .environment(\.isFlowNodeSelected, store.selectedNodeIDs.contains(node.id))
+                    .environment(\.isFlowNodeHovered, store.hoveredNodeID == node.id)
+                    .environment(\.isFlowNodeFocused, store.focusedTarget == .node(node.id))
                     .environment(
                         \.liveNodeEnvironment,
                         LiveNodeEnvironment(
@@ -401,8 +409,8 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
-                activation: liveNodeActivationPredicate,
-                coordinator: liveNodeActivationCoordinator,
+                interaction: liveNodeInteractionPredicate,
+                coordinator: liveNodeInteractionCoordinator,
                 isViewportInteracting: isViewportInteracting
             )
             if hasAccessory {
@@ -450,8 +458,8 @@ public struct FlowCanvas<
                 canvasSize: size,
                 nodeContent: nodeContentBuilder,
                 renderContext: { node in nodeRenderContext(for: node) },
-                activation: liveNodeActivationPredicate,
-                coordinator: liveNodeActivationCoordinator,
+                interaction: liveNodeInteractionPredicate,
+                coordinator: liveNodeInteractionCoordinator,
                 isViewportInteracting: isViewportInteracting
             )
             if hasAccessory {
@@ -692,8 +700,8 @@ public struct FlowCanvas<
 
             // Skip rasterized draw for nodes the overlay is currently
             // drawing (live view visible at opacity 1). Gated on both
-            // `renderedActive` *and* live presence — a plain node that
-            // becomes "active" on hover has no live view to hand off
+            // `renderedInteractive` *and* live presence — a plain node that
+            // becomes interactive on hover has no live view to hand off
             // to, so Canvas must keep drawing it. While the user is
             // mid-pan / mid-zoom we suppress this skip entirely so the
             // Canvas keeps drawing every node from its poster — the
@@ -701,7 +709,7 @@ public struct FlowCanvas<
             // skipping here would briefly drop the node from the
             // canvas.
             if !isViewportInteracting,
-               liveNodeActivationCoordinator.overlayIsDrawing(node.id) {
+               liveNodeInteractionCoordinator.overlayIsDrawing(node.id) {
                 continue
             }
 
@@ -802,6 +810,7 @@ public struct FlowCanvas<
                               store.configuration.multiSelectionEnabled {
                         let canvasStart = store.viewport.screenToCanvas(value.startLocation)
                         dragMode = .selection(origin: canvasStart)
+                        store.beginSelectionRect()
                     }
                 }
 
@@ -817,7 +826,7 @@ public struct FlowCanvas<
                             height: canvasCurrent.y - origin.y
                         )
                     )
-                    store.selectionRect = rect
+                    store.updateSelectionRect(rect)
                     store.selectInRect(rect)
                 case .nodeMove:
                     store.updateNodeDrag(translation: value.translation)
@@ -838,7 +847,7 @@ public struct FlowCanvas<
             .onEnded { value in
                 switch dragMode {
                 case .selection:
-                    store.selectionRect = nil
+                    store.endSelectionRect()
                 case .nodeMove:
                     store.endNodeDrag()
                 case .connection(let handle):
@@ -893,6 +902,7 @@ public struct FlowCanvas<
         // Perform single-tap action immediately (no delay)
         switch currentTarget {
         case .node(let nodeID):
+            store.focusNode(nodeID)
             if isAdditive {
                 if store.selectedNodeIDs.contains(nodeID) {
                     store.deselectNode(nodeID)
@@ -903,6 +913,7 @@ public struct FlowCanvas<
                 store.selectNode(nodeID)
             }
         case .edge(let edgeID):
+            store.focusEdge(edgeID)
             if isAdditive {
                 if store.selectedEdgeIDs.contains(edgeID) {
                     store.deselectEdge(edgeID)
@@ -915,6 +926,7 @@ public struct FlowCanvas<
         case .canvas, .none:
             if !isAdditive {
                 store.clearSelection()
+                store.clearFocus()
             }
         }
 

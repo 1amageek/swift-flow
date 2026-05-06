@@ -1,27 +1,27 @@
 import Testing
 @testable import SwiftFlow
 
-@Suite("LiveNodeActivationCoordinator Tests")
+@Suite("LiveNodeInteractionCoordinator Tests")
 @MainActor
-struct LiveNodeActivationCoordinatorTests {
+struct LiveNodeInteractionCoordinatorTests {
 
     @Test("Atomic preferences replace scoped entries and preserve outside scope")
     func atomicPreferencesReplaceScopedEntriesAndPreserveOutsideScope() {
-        let coordinator = LiveNodeActivationCoordinator()
+        let coordinator = LiveNodeInteractionCoordinator()
 
         coordinator.applyPreferences(
             evaluated: ["a", "b"],
             present: ["a", "b"],
             policies: [
                 "a": .persistent,
-                "b": .remountOnActivation,
+                "b": .remountOnInteraction,
             ],
             storeNodeIDs: ["a", "b"]
         )
 
         #expect(coordinator.liveNodeIDs == ["a", "b"])
         #expect(coordinator.liveNodeMountPolicies["a"] == .persistent)
-        #expect(coordinator.liveNodeMountPolicies["b"] == .remountOnActivation)
+        #expect(coordinator.liveNodeMountPolicies["b"] == .remountOnInteraction)
 
         coordinator.applyPreferences(
             evaluated: ["b"],

@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - LiveNode
 
 /// Declares a node whose body is rendered as a live SwiftUI view while
-/// active, and as a rasterized snapshot while inactive.
+/// interactive, and as a rasterized snapshot while not interactive.
 ///
 /// `LiveNode` must be used inside a `FlowCanvas` `nodeContent` closure.
 /// The canvas injects the surrounding node's identity, size, and snapshot
@@ -30,7 +30,7 @@ import SwiftUI
 ///
 /// Inside `WebRepresentable.makeUIView` / `makeNSView` the developer reads
 /// `\.liveNodeSnapshotContext` and either registers a capture handler
-/// (called during deactivation) or pushes a snapshot directly when an
+/// (called during interaction end) or pushes a snapshot directly when an
 /// internal event lands (navigation finish, tile render). See
 /// ``LiveNodeSnapshotContext`` for details.
 public struct LiveNode<Content: View, Placeholder: View>: View {
@@ -44,7 +44,7 @@ public struct LiveNode<Content: View, Placeholder: View>: View {
 
     public init<Data>(
         node: FlowNode<Data>,
-        mount: LiveNodeMountPolicy = .onActivation,
+        mount: LiveNodeMountPolicy = .onInteraction,
         @ViewBuilder content: @escaping () -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) where Data: Sendable & Hashable {
@@ -56,7 +56,7 @@ public struct LiveNode<Content: View, Placeholder: View>: View {
 
     public init<Data>(
         node: FlowNode<Data>,
-        mount: LiveNodeMountPolicy = .onActivation,
+        mount: LiveNodeMountPolicy = .onInteraction,
         @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content,
         @ViewBuilder placeholder: @escaping () -> Placeholder
     ) where Data: Sendable & Hashable {
@@ -100,7 +100,7 @@ public struct LiveNode<Content: View, Placeholder: View>: View {
 extension LiveNode where Placeholder == FlowDefaultPlaceholder {
     public init<Data>(
         node: FlowNode<Data>,
-        mount: LiveNodeMountPolicy = .onActivation,
+        mount: LiveNodeMountPolicy = .onInteraction,
         @ViewBuilder content: @escaping () -> Content
     ) where Data: Sendable & Hashable {
         self.init(
@@ -113,7 +113,7 @@ extension LiveNode where Placeholder == FlowDefaultPlaceholder {
 
     public init<Data>(
         node: FlowNode<Data>,
-        mount: LiveNodeMountPolicy = .onActivation,
+        mount: LiveNodeMountPolicy = .onInteraction,
         @ViewBuilder content: @escaping (LiveNodeContentContext) -> Content
     ) where Data: Sendable & Hashable {
         self.init(
@@ -149,22 +149,22 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     let placeholder: () -> Placeholder
 
     @Environment(\.flowNodeRenderPhase) private var phase
-    @Environment(\.isFlowNodeActive) private var isActive
+    @Environment(\.isFlowNodeInteractive) private var isInteractive
     @Environment(\.displayScale) private var displayScale
     @Environment(\.self) private var swiftUIEnvironment
     @Environment(\.flowLiveNodeSnapshotWriter) private var snapshotWriter
-    @Environment(\.liveNodeActivationCoordinator) private var coordinator
+    @Environment(\.liveNodeInteractionCoordinator) private var coordinator
 
     @State private var nativeCapture = LiveNodeNativeCaptureRegistry()
     @State private var remountGeneration: Int = 0
-    @State private var previousActiveState: Bool = false
+    @State private var previousInteractiveState: Bool = false
 
     private var contentContext: LiveNodeContentContext {
         LiveNodeContentContext(
             id: environment.id,
             size: environment.size,
             snapshot: environment.snapshot,
-            isActive: isActive
+            isInteractive: isInteractive
         )
     }
 
@@ -178,10 +178,10 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
             )
             .environment(\.liveNodeSnapshotContext, makeSnapshotContext())
             .onAppear {
-                previousActiveState = isActive
+                previousInteractiveState = isInteractive
             }
-            .onChange(of: isActive) { _, newValue in
-                handleActiveStateChange(newValue)
+            .onChange(of: isInteractive) { _, newValue in
+                handleInteractiveStateChange(newValue)
             }
     }
 
@@ -202,35 +202,35 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
                 content: { content(contentContext) }
             )
             .task(id: environment.id) {
-                registerDeactivationCapture()
+                registerInteractionEndCapture()
             }
             .onDisappear {
-                unregisterDeactivationCapture()
+                unregisterInteractionEndCapture()
             }
         }
     }
 
-    private func handleActiveStateChange(_ isNowActive: Bool) {
-        defer { previousActiveState = isNowActive }
+    private func handleInteractiveStateChange(_ isNowInteractive: Bool) {
+        defer { previousInteractiveState = isNowInteractive }
 
-        guard isNowActive, previousActiveState == false else {
+        guard isNowInteractive, previousInteractiveState == false else {
             return
         }
 
-        if configuration.mountPolicy == .remountOnActivation {
+        if configuration.mountPolicy == .remountOnInteraction {
             remountGeneration += 1
         }
     }
 
     @MainActor
-    private func registerDeactivationCapture() {
+    private func registerInteractionEndCapture() {
         coordinator?.registerCapture(for: environment.id) {
             await captureNow()
         }
     }
 
     @MainActor
-    private func unregisterDeactivationCapture() {
+    private func unregisterInteractionEndCapture() {
         coordinator?.unregisterCapture(for: environment.id)
     }
 
@@ -335,7 +335,7 @@ private struct LiveNodeLiveBody<Content: View>: View {
 
     private var shouldDrawSnapshotBackdrop: Bool {
         switch mountPolicy {
-        case .onActivation, .remountOnActivation:
+        case .onInteraction, .remountOnInteraction:
             return true
 
         case .persistent:
@@ -345,10 +345,10 @@ private struct LiveNodeLiveBody<Content: View>: View {
 
     private var contentIdentity: String {
         switch mountPolicy {
-        case .onActivation, .persistent:
+        case .onInteraction, .persistent:
             return "stable"
 
-        case .remountOnActivation:
+        case .remountOnInteraction:
             return "remount-\(remountGeneration)"
         }
     }

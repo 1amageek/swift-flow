@@ -16,7 +16,7 @@ import SwiftUI
 /// - ``write(_:)`` — push a snapshot directly. Use after a navigation
 ///   completes (`WKWebView`) or a tile pass lands (`MKMapView`).
 /// - ``registerCapture(_:)`` — install an async capture handler that
-///   `LiveNode` invokes during the deactivation pipeline (and via
+///   `LiveNode` invokes during the interaction-end pipeline (and via
 ///   ``requestCapture()``). The handler typically reads from the live
 ///   native view weakly and produces a `FlowNodeSnapshot`.
 /// - ``requestCapture()`` — explicitly drive a capture pass on demand,

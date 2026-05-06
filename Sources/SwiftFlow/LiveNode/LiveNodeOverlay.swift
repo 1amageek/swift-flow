@@ -249,8 +249,14 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                     clearOverlayHover: { nodeID in
                         LiveNodeDebugLog.log("overlay.hover.ended ignored node=\(nodeID) current=\(store.hoveredNodeID ?? "nil")")
                     },
-                    selectNodeForDirectInteraction: { nodeID in
-                        if store.selectedNodeIDs.contains(nodeID) {
+                    selectNodeForDirectInteraction: { nodeID, isAdditive in
+                        if isAdditive {
+                            if store.selectedNodeIDs.contains(nodeID) {
+                                store.deselectNode(nodeID)
+                            } else {
+                                store.selectNode(nodeID, exclusive: false)
+                            }
+                        } else if store.selectedNodeIDs.contains(nodeID) {
                             store.focusNode(nodeID)
                         } else {
                             store.selectNode(nodeID)
@@ -339,7 +345,7 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
     let nodeContent: (FlowNode<NodeData>, NodeRenderContext) -> Content
     let setOverlayHover: (String) -> Void
     let clearOverlayHover: (String) -> Void
-    let selectNodeForDirectInteraction: (String) -> Void
+    let selectNodeForDirectInteraction: (String, Bool) -> Void
 
     /// Mount decision depends on the per-node mount policy:
     ///
@@ -470,7 +476,10 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                     TapGesture()
                         .onEnded {
                             guard effectiveHittable else { return }
-                            selectNodeForDirectInteraction(node.id)
+                            selectNodeForDirectInteraction(
+                                node.id,
+                                FlowSelectionModifier.isAdditiveSelectionActive
+                            )
                         }
                 )
                 .liveNodeOverlayHoverTracking(
@@ -479,7 +488,12 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                     clearHover: clearOverlayHover
                 )
         } else {
-            Color.clear.frame(width: 0, height: 0)
+            Color.clear
+                .frame(
+                    width: node.size.width + handleInset * 2,
+                    height: node.size.height + handleInset * 2
+                )
+                .allowsHitTesting(false)
         }
     }
 }

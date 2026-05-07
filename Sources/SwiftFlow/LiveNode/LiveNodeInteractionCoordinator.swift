@@ -195,7 +195,6 @@ final class LiveNodeInteractionCoordinator {
         for nodeID: String,
         handler: @escaping @MainActor () async -> Void
     ) {
-        LiveNodeDebugLog.log("capture.register node=\(nodeID)")
         captureHandlers[nodeID] = handler
     }
 
@@ -213,7 +212,6 @@ final class LiveNodeInteractionCoordinator {
     /// ``update(nodeID:intent:)``, which is driven by the predicate
     /// edge.
     func unregisterCapture(for nodeID: String) {
-        LiveNodeDebugLog.log("capture.unregister node=\(nodeID)")
         captureHandlers.removeValue(forKey: nodeID)
     }
 
@@ -232,38 +230,24 @@ final class LiveNodeInteractionCoordinator {
         intent[nodeID] = newIntent
         guard previous != newIntent else { return }
 
-        LiveNodeDebugLog.log(
-            "intent.changed node=\(nodeID) previous=\(previous) next=\(newIntent) rendered=\(renderedInteractive.contains(nodeID)) live=\(liveNodeIDs.contains(nodeID)) policy=\(mountPolicy(for: nodeID)) hasHandler=\(captureHandlers[nodeID] != nil)"
-        )
 
         if newIntent {
             if let task = interactionEndTasks.removeValue(forKey: nodeID) {
-                LiveNodeDebugLog.log("interaction.end.cancel node=\(nodeID) reason=intent-returned")
                 task.cancel()
             }
             renderedInteractive.insert(nodeID)
-            LiveNodeDebugLog.log("renderedInteractive.insert node=\(nodeID)")
         } else {
             guard renderedInteractive.contains(nodeID) else { return }
             if let task = interactionEndTasks.removeValue(forKey: nodeID) {
-                LiveNodeDebugLog.log("interaction.end.cancel node=\(nodeID) reason=replaced")
                 task.cancel()
             }
             let handler = captureHandlers[nodeID]
-            LiveNodeDebugLog.log("interaction.end.start node=\(nodeID) hasHandler=\(handler != nil)")
             interactionEndTasks[nodeID] = Task { @MainActor [weak self] in
-                let startedAt = ProcessInfo.processInfo.systemUptime
                 if let handler {
-                    LiveNodeDebugLog.log("interaction.end.capture.begin node=\(nodeID)")
                     await handler()
-                    let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
-                    LiveNodeDebugLog.log("interaction.end.capture.end node=\(nodeID) elapsed=\(String(format: "%.3fs", elapsed))")
-                } else {
-                    LiveNodeDebugLog.log("interaction.end.capture.skipped node=\(nodeID) reason=no-handler")
                 }
                 guard let self else { return }
                 if Task.isCancelled {
-                    LiveNodeDebugLog.log("interaction.end.cancelled node=\(nodeID) stage=after-capture")
                     return
                 }
                 // Confirm the user didn't re-hover while capturing; if
@@ -271,9 +255,6 @@ final class LiveNodeInteractionCoordinator {
                 // cancelled this task and we would have returned above.
                 if self.intent[nodeID] == false {
                     self.renderedInteractive.remove(nodeID)
-                    LiveNodeDebugLog.log("renderedInteractive.remove node=\(nodeID)")
-                } else {
-                    LiveNodeDebugLog.log("interaction.end.keepInteractive node=\(nodeID) reason=intent-true")
                 }
                 self.interactionEndTasks.removeValue(forKey: nodeID)
             }

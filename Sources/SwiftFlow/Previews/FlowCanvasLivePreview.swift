@@ -762,8 +762,8 @@ private struct LivePreviewSelectionShadow: ViewModifier {
             )
             .shadow(
                 color: isSelected ? Color.black.opacity(0.28) : .clear,
-                radius: isSelected ? 14 : 0,
-                y: isSelected ? 7 : 0
+                radius: isSelected ? 20 : 0,
+                y: isSelected ? 9 : 0
             )
     }
 }

@@ -264,7 +264,7 @@ private struct PreviewNode: View {
         switch node.phase {
         case .normal:
             if node.isDropTarget { return 10 }
-            if node.isSelected { return 8 }
+            if node.isSelected { return 12 }
             if node.isHovered { return 5 }
             return 3
         case .draft:
@@ -275,7 +275,8 @@ private struct PreviewNode: View {
     private var focusShadowYOffset: CGFloat {
         switch node.phase {
         case .normal:
-            if node.isDropTarget || node.isSelected { return 0 }
+            if node.isDropTarget { return 0 }
+            if node.isSelected { return 2 }
             if node.isHovered { return 1 }
             return 2
         case .draft:

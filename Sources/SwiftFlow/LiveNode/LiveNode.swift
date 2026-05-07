@@ -176,11 +176,6 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
                 value: [environment.id: configuration.mountPolicy]
             )
             .environment(\.liveNodeSnapshotContext, makeSnapshotContext())
-            .onChange(of: isInteractive) { oldValue, newValue in
-                LiveNodeDebugLog.log(
-                    "interactive.changed node=\(environment.id) previous=\(oldValue) next=\(newValue) mount=\(configuration.mountPolicy)"
-                )
-            }
     }
 
     @ViewBuilder
@@ -236,7 +231,6 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
         guard !Task.isCancelled else { return }
         guard environment.snapshot == nil else { return }
 
-        LiveNodeDebugLog.log("initialSnapshot.seed node=\(environment.id)")
         await captureNow()
     }
 
@@ -244,19 +238,14 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
     private func captureNow() async {
         guard let snapshotWriter else { return }
         guard !Task.isCancelled else {
-            LiveNodeDebugLog.log("captureNow.skipped node=\(environment.id) reason=cancelled-before")
             return
         }
-        LiveNodeDebugLog.log("captureNow.started node=\(environment.id)")
         guard let snapshot = await produceSnapshot() else {
-            LiveNodeDebugLog.log("captureNow.empty node=\(environment.id)")
             return
         }
         guard !Task.isCancelled else {
-            LiveNodeDebugLog.log("captureNow.skipped node=\(environment.id) reason=cancelled-after-produce")
             return
         }
-        LiveNodeDebugLog.log("captureNow.write node=\(environment.id)")
         snapshotWriter(environment.id, snapshot)
     }
 
@@ -299,15 +288,12 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
         return LiveNodeSnapshotContext(
             nodeID: nodeID,
             write: { snapshot in
-                LiveNodeDebugLog.log("snapshotWriter.direct node=\(nodeID)")
                 snapshotWriter(nodeID, snapshot)
             },
             registerCapture: { handler in
-                LiveNodeDebugLog.log("nativeCapture.register node=\(nodeID)")
                 registry.handler = handler
             },
             unregisterCapture: {
-                LiveNodeDebugLog.log("nativeCapture.unregister node=\(nodeID)")
                 registry.handler = nil
             },
             allowsImmediateSnapshotWrites: {
@@ -316,18 +302,14 @@ private struct LiveNodeCore<Content: View, Placeholder: View>: View {
             requestCapture: {
                 guard let handler = registry.handler else { return }
                 guard !Task.isCancelled else {
-                    LiveNodeDebugLog.log("snapshot.requestCapture.cancelled node=\(nodeID) stage=before")
                     return
                 }
                 guard let snapshot = await handler() else {
-                    LiveNodeDebugLog.log("snapshot.requestCapture.empty node=\(nodeID)")
                     return
                 }
                 guard !Task.isCancelled else {
-                    LiveNodeDebugLog.log("snapshot.requestCapture.cancelled node=\(nodeID) stage=after")
                     return
                 }
-                LiveNodeDebugLog.log("snapshot.requestCapture.write node=\(nodeID)")
                 snapshotWriter(nodeID, snapshot)
             }
         )

@@ -65,10 +65,8 @@ public struct LiveNodeSnapshotContext: Sendable {
     @MainActor
     public func write(_ snapshot: FlowNodeSnapshot) {
         guard allowsImmediateSnapshotWrites else {
-            LiveNodeDebugLog.log("snapshot.write skipped node=\(nodeID) reason=deferred")
             return
         }
-        LiveNodeDebugLog.log("snapshot.write committed node=\(nodeID)")
         _write(snapshot)
     }
 
@@ -87,10 +85,8 @@ public struct LiveNodeSnapshotContext: Sendable {
     @MainActor
     public func requestCapture() async {
         guard allowsImmediateSnapshotWrites else {
-            LiveNodeDebugLog.log("snapshot.requestCapture skipped node=\(nodeID) reason=deferred")
             return
         }
-        LiveNodeDebugLog.log("snapshot.requestCapture started node=\(nodeID)")
         await _requestCapture()
     }
 }

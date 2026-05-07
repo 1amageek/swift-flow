@@ -244,12 +244,9 @@ struct LiveNodeOverlay<NodeData: Sendable & Hashable, Content: View>: View {
                     renderContext: renderContext(node),
                     nodeContent: nodeContent,
                     setOverlayHover: { nodeID in
-                        LiveNodeDebugLog.log("overlay.hover.active node=\(nodeID)")
                         store.setHoveredNode(nodeID, source: "overlay.hover.active")
                     },
-                    clearOverlayHover: { nodeID in
-                        LiveNodeDebugLog.log("overlay.hover.ended ignored node=\(nodeID) current=\(store.hoveredNodeID ?? "nil")")
-                    },
+                    clearOverlayHover: { _ in },
                     selectNodeForDirectInteraction: { nodeID, isAdditive in
                         let mode: FlowSelectionMode = isAdditive ? .toggle : .replace
                         store.selectNodeFromPointer(nodeID, mode: mode)
@@ -444,26 +441,6 @@ private struct LiveNodeOverlayRow<NodeData: Sendable & Hashable, Content: View>:
                 )
                 .opacity(effectiveVisible ? 1 : 0)
                 .allowsHitTesting(effectiveHittable)
-                .onAppear {
-                    LiveNodeDebugLog.log(
-                        "overlay.mount node=\(node.id) visible=\(effectiveVisible) interactive=\(effectiveInteractive) hittable=\(effectiveHittable) warming=\(isWarmingUp) deferred=\(defersSnapshotWrites) snapshot=\(renderContext.snapshot != nil)"
-                    )
-                }
-                .onDisappear {
-                    LiveNodeDebugLog.log("overlay.unmount node=\(node.id)")
-                }
-                .onChange(of: effectiveVisible) { _, newValue in
-                    LiveNodeDebugLog.log("overlay.visible node=\(node.id) value=\(newValue)")
-                }
-                .onChange(of: effectiveInteractive) { _, newValue in
-                    LiveNodeDebugLog.log("overlay.interactive node=\(node.id) value=\(newValue)")
-                }
-                .onChange(of: effectiveHittable) { _, newValue in
-                    LiveNodeDebugLog.log("overlay.hittable node=\(node.id) value=\(newValue)")
-                }
-                .onChange(of: defersSnapshotWrites) { _, newValue in
-                    LiveNodeDebugLog.log("overlay.deferSnapshotWrites node=\(node.id) value=\(newValue)")
-                }
                 .simultaneousGesture(
                     TapGesture()
                         .onEnded {

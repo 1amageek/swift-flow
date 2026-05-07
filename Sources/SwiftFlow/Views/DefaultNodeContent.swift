@@ -88,7 +88,7 @@ public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
     private var emphasisShadowRadius: CGFloat {
         switch node.phase {
         case .normal:
-            if node.isSelected { return 8 }
+            if node.isSelected { return 12 }
             if node.isHovered { return 5 }
             return 3
         case .draft:
@@ -99,7 +99,7 @@ public struct DefaultNodeContent<NodeData: Sendable & Hashable>: View {
     private var emphasisShadowYOffset: CGFloat {
         switch node.phase {
         case .normal:
-            if node.isSelected { return 0 }
+            if node.isSelected { return 2 }
             if node.isHovered { return 1 }
             return 2
         case .draft:

@@ -122,7 +122,6 @@ final class CanvasNSHostView<Content: View>: NSView {
     override func mouseExited(with event: NSEvent) {
         NSCursor.arrow.set()
         guard !isMouseInsideBounds() else {
-            LiveNodeDebugLog.log("canvasHost.mouseExited ignored reason=still-inside")
             return
         }
         MainActor.assumeIsolated {

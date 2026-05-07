@@ -15,7 +15,7 @@ Edges are batch-drawn via `GraphicsContext` for performance. Nodes are rendered 
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.18.1")
+    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.18.2")
 ]
 ```
 

@@ -9,6 +9,7 @@ import MapKit
 /// minimal data needed to construct its body without consulting an external
 /// lookup.
 private enum LivePreviewData: Sendable, Hashable {
+    case group(title: String, color: String)
     case web(url: URL, title: String)
     case map(latitude: Double, longitude: Double, title: String)
     case resizable(title: String, color: String)
@@ -16,7 +17,8 @@ private enum LivePreviewData: Sendable, Hashable {
 
     var title: String {
         switch self {
-        case let .web(_, title),
+        case let .group(title, _),
+             let .web(_, title),
              let .map(_, _, title),
              let .resizable(title, _),
              let .timeline(title, _):
@@ -26,6 +28,7 @@ private enum LivePreviewData: Sendable, Hashable {
 
     var headerColor: Color {
         switch self {
+        case .group:     return .purple
         case .web:       return .blue
         case .map:       return .green
         case .resizable: return .orange
@@ -35,6 +38,7 @@ private enum LivePreviewData: Sendable, Hashable {
 
     var headerSymbol: String {
         switch self {
+        case .group:     return "rectangle.3.group"
         case .web:       return "globe"
         case .map:       return "map"
         case .resizable: return "square.resize"
@@ -412,40 +416,67 @@ public struct FlowCanvasLiveDemoView: View {
 private struct LiveFlowPreview: View {
 
     @State private var mapStateStore = LiveMapNodeStateStore()
+    @State private var selectionGroupName = "Research group"
     @State private var store: FlowStore<LivePreviewData> = {
-        FlowStore<LivePreviewData>(
+        let store = FlowStore<LivePreviewData>(
             nodes: [
+                FlowNode(
+                    id: "research-group",
+                    position: CGPoint(x: 40, y: 50),
+                    size: CGSize(width: 790, height: 630),
+                    data: .group(title: "Research group", color: "purple"),
+                    acceptsChildren: true,
+                    zIndex: -20,
+                    handles: []
+                ),
+                FlowNode(
+                    id: "media-group",
+                    position: CGPoint(x: 50, y: 360),
+                    size: CGSize(width: 740, height: 300),
+                    data: .group(title: "Media group", color: "indigo"),
+                    parentID: "research-group",
+                    acceptsChildren: true,
+                    zIndex: -10,
+                    handles: []
+                ),
                 FlowNode(
                     id: "developer",
                     position: CGPoint(x: 60, y: 80),
                     size: CGSize(width: 360, height: 240),
-                    data: .web(url: URL(string: "https://developer.apple.com")!, title: "developer.apple.com")
+                    data: .web(url: URL(string: "https://developer.apple.com")!, title: "developer.apple.com"),
+                    parentID: "research-group"
                 ),
                 FlowNode(
                     id: "tokyo",
                     position: CGPoint(x: 60, y: 400),
                     size: CGSize(width: 360, height: 240),
-                    data: .map(latitude: 35.6812, longitude: 139.7671, title: "Tokyo Station")
+                    data: .map(latitude: 35.6812, longitude: 139.7671, title: "Tokyo Station"),
+                    parentID: "media-group"
                 ),
                 FlowNode(
                     id: "scratch",
                     position: CGPoint(x: 520, y: 300),
                     size: CGSize(width: 220, height: 140),
-                    data: .resizable(title: "Resize Me", color: "orange")
+                    data: .resizable(title: "Resize Me", color: "orange"),
+                    parentID: "media-group"
                 ),
                 FlowNode(
                     id: "timeline",
                     position: CGPoint(x: 520, y: 80),
                     size: CGSize(width: 260, height: 160),
-                    data: .timeline(title: "Timeline Live", color: "teal")
+                    data: .timeline(title: "Timeline Live", color: "teal"),
+                    parentID: "research-group"
                 ),
             ],
             edges: [
-                FlowEdge(id: "e1", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "tokyo", targetHandleID: "target"),
-                FlowEdge(id: "e2", sourceNodeID: "tokyo", sourceHandleID: "source", targetNodeID: "scratch", targetHandleID: "target"),
-                FlowEdge(id: "e3", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "timeline", targetHandleID: "target"),
+                FlowEdge(id: "e1", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "tokyo", targetHandleID: "target", parentID: "research-group"),
+                FlowEdge(id: "e2", sourceNodeID: "tokyo", sourceHandleID: "source", targetNodeID: "scratch", targetHandleID: "target", parentID: "media-group"),
+                FlowEdge(id: "e3", sourceNodeID: "developer", sourceHandleID: "source", targetNodeID: "timeline", targetHandleID: "target", parentID: "research-group"),
             ]
         )
+        store.selectNode("developer")
+        store.selectNode("timeline", exclusive: false)
+        return store
     }()
 
     var body: some View {
@@ -458,6 +489,21 @@ private struct LiveFlowPreview: View {
                     return true
                 }
                 return store.hoveredNodeID == node.id
+            }
+            .selectionDecoration(layer: .background) { context, selection in
+                drawSelectionGroupBackground(context: &context, selection: selection)
+            }
+            .selectionDecoration(layer: .overlay) { context, selection in
+                drawSelectionGroupBorder(context: &context, selection: selection)
+            }
+            .selectionAccessory(layer: .overlay) { selection in
+                SelectionSummaryAccessory(
+                    selection: selection,
+                    groupName: $selectionGroupName
+                ) {
+                    createGroupFromSelection()
+                    selectionGroupName = "New group"
+                }
             }
             .overlay {
                 ForEach(Array(store.selectedNodeIDs), id: \.self) { nodeID in
@@ -473,7 +519,7 @@ private struct LiveFlowPreview: View {
                 Text("Hover a node to switch from snapshot to its live view. Timeline Live stays live through liveNodeInteraction.")
                 Text("Drag from the header strip — flowDragHandle(for:in:) routes the drag through FlowStore, so the WKWebView / MKMapView body keeps its own scroll/pan.")
                     .foregroundStyle(.secondary)
-                Text("Select the orange node and drag a corner handle to resize.")
+                Text("Initial selection demonstrates selectionDecoration and selectionAccessory. Select the orange node and drag a corner handle to resize.")
                     .foregroundStyle(.secondary)
             }
             .font(.caption)
@@ -481,11 +527,16 @@ private struct LiveFlowPreview: View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
             .padding(12)
 
+            LiveHierarchyDiagnosticsPanel(store: store)
+            .padding(12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .allowsHitTesting(false)
+
             LiveMapLifecycleDiagnosticsPanel(
                 diagnostics: mapStateStore.diagnostics(for: "tokyo")
             )
             .padding(12)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             .allowsHitTesting(false)
         }
     }
@@ -500,6 +551,138 @@ private struct LiveFlowPreview: View {
         )
     }
 
+    private func drawSelectionGroupBackground(
+        context: inout GraphicsContext,
+        selection: FlowSelectionContext<LivePreviewData>
+    ) {
+        guard selection.nodes.count > 1,
+              let bounds = selection.boundsInScreen
+        else {
+            return
+        }
+
+        let path = Path(
+            roundedRect: bounds.insetBy(dx: -18, dy: -18),
+            cornerRadius: 22
+        )
+        context.fill(path, with: .color(Color.accentColor.opacity(0.045)))
+    }
+
+    private func drawSelectionGroupBorder(
+        context: inout GraphicsContext,
+        selection: FlowSelectionContext<LivePreviewData>
+    ) {
+        guard selection.nodes.count > 1,
+              let bounds = selection.boundsInScreen
+        else {
+            return
+        }
+
+        let path = Path(
+            roundedRect: bounds.insetBy(dx: -18, dy: -18),
+            cornerRadius: 22
+        )
+        context.stroke(
+            path,
+            with: .color(Color.accentColor.opacity(0.78)),
+            style: StrokeStyle(lineWidth: 1.5)
+        )
+    }
+
+    private func createGroupFromSelection() {
+        let title = selectionGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        store.groupSelection(
+            data: .group(title: title, color: "purple"),
+            padding: 18
+        )
+    }
+
+}
+
+private struct SelectionSummaryAccessory: View {
+
+    let selection: FlowSelectionContext<LivePreviewData>
+    @Binding var groupName: String
+    let createGroup: () -> Void
+
+    var body: some View {
+        if selection.nodes.count > 1,
+           let bounds = selection.boundsInScreen {
+            HStack(spacing: 8) {
+                Label("\(selection.nodes.count)", systemImage: "rectangle.3.group")
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.secondary)
+
+                TextField("Group name", text: $groupName)
+                    .textFieldStyle(.plain)
+                    .font(.caption.weight(.semibold))
+                    .frame(width: 180)
+                    .onSubmit(createGroup)
+
+                Text("\(selection.nodes.count) nodes")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+
+                Button(action: createGroup) {
+                    Image(systemName: "plus.square.on.square")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .help("Create group from selection")
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(Color.accentColor.opacity(0.32), lineWidth: 1)
+            }
+            .position(x: bounds.midX, y: max(24, bounds.minY - 22))
+        }
+    }
+}
+
+private struct LiveHierarchyDiagnosticsPanel: View {
+
+    let store: FlowStore<LivePreviewData>
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Hierarchy")
+                .font(.caption.weight(.semibold))
+            hierarchyRow("research", nodeID: "research-group")
+            hierarchyRow("media", nodeID: "media-group")
+            Divider()
+            Text("parentID drives nested nodes and edges")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption.monospaced())
+        .padding(10)
+        .frame(width: 250, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func hierarchyRow(_ label: String, nodeID: String) -> some View {
+        let children = store.childNodes(of: nodeID).map(\.id).joined(separator: ", ")
+        let edges = store.childEdges(of: nodeID).map(\.id).joined(separator: ", ")
+        let descendants = store.descendantNodeIDs(of: nodeID).count
+
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(label)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Text("\(descendants)")
+            }
+            Text("nodes: \(children.isEmpty ? "-" : children)")
+                .lineLimit(2)
+            Text("edges: \(edges.isEmpty ? "-" : edges)")
+                .lineLimit(1)
+        }
+    }
 }
 
 private struct LiveMapLifecycleDiagnosticsPanel: View {
@@ -507,23 +690,20 @@ private struct LiveMapLifecycleDiagnosticsPanel: View {
     let diagnostics: LiveMapNodeDiagnostics
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             Text("Map lifecycle")
-                .font(.caption.weight(.semibold))
-            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
+                .font(.caption2.weight(.semibold))
+            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 2) {
                 row("node", diagnostics.nodeID)
                 row("mapID", diagnostics.mapID)
                 row("make", "\(diagnostics.makeCount)")
                 row("dismantle", "\(diagnostics.dismantleCount)")
             }
-            Divider()
-            Text("Persistent check: make=1, dismantle=0, stable mapID")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
-        .font(.caption.monospaced())
-        .padding(10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .font(.caption2.monospaced())
+        .padding(7)
+        .frame(width: 150, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func row(_ label: String, _ value: String) -> some View {
@@ -565,16 +745,19 @@ private struct LivePreviewNodeBody: View {
     @ViewBuilder
     private var nodeView: some View {
         let cornerRadius: CGFloat = 12
-        let contentSize = CGSize(
+        let elementContentSize = CGSize(
             width: node.size.width,
             height: max(1, node.size.height - Self.headerHeight)
         )
 
         switch node.data {
+        case let .group(_, color):
+            groupContainerBody(color: color, cornerRadius: cornerRadius)
+
         case let .web(url, title):
-            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
+            windowBody(cornerRadius: cornerRadius, contentSize: elementContentSize) {
                 WebNodeView(
-                    node: contentNode(size: contentSize),
+                    node: contentNode(size: elementContentSize),
                     url: url,
                     title: title,
                     cornerRadius: 0
@@ -582,9 +765,9 @@ private struct LivePreviewNodeBody: View {
             }
 
         case let .map(latitude, longitude, _):
-            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
+            windowBody(cornerRadius: cornerRadius, contentSize: elementContentSize) {
                 LiveMapNode(
-                    node: contentNode(size: contentSize),
+                    node: contentNode(size: elementContentSize),
                     initialCoordinate: CLLocationCoordinate2D(
                         latitude: latitude,
                         longitude: longitude
@@ -595,13 +778,13 @@ private struct LivePreviewNodeBody: View {
             }
 
         case let .resizable(_, color):
-            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
-                resizableBody(color: color, contentSize: contentSize)
+            windowBody(cornerRadius: cornerRadius, contentSize: elementContentSize) {
+                resizableBody(color: color, contentSize: elementContentSize)
             }
 
         case let .timeline(_, color):
-            windowBody(cornerRadius: cornerRadius, contentSize: contentSize) {
-                timelineBody(color: color, contentSize: contentSize)
+            windowBody(cornerRadius: cornerRadius, contentSize: elementContentSize) {
+                timelineBody(color: color, contentSize: elementContentSize)
             }
         }
     }
@@ -687,12 +870,54 @@ private struct LivePreviewNodeBody: View {
         .allowsHitTesting(false)
     }
 
+    private func groupContainerBody(color colorName: String, cornerRadius: CGFloat) -> some View {
+        let color = resizableColor(named: colorName)
+        let childCount = store.childNodes(of: node.id).count
+        let edgeCount = store.childEdges(of: node.id).count
+        let descendantCount = store.descendantNodeIDs(of: node.id).count
+
+        return ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .fill(color.opacity(0.055))
+
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .strokeBorder(color.opacity(0.38), lineWidth: 1.4)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 7) {
+                    Image(systemName: node.data.headerSymbol)
+                    Text(node.data.title)
+                        .font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(color)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(.regularMaterial, in: Capsule())
+
+                HStack(spacing: 9) {
+                    Label("\(childCount)", systemImage: "square.stack.3d.up")
+                    Label("\(edgeCount)", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                    Label("\(descendantCount)", systemImage: "list.tree")
+                }
+                .labelStyle(.titleAndIcon)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            }
+            .padding(12)
+        }
+        .frame(width: node.size.width, height: node.size.height)
+        .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .livePreviewGroupShadow()
+    }
+
     private func resizableColor(named name: String) -> Color {
         switch name {
         case "blue":   return .blue
         case "orange": return .orange
         case "green":  return .green
         case "teal":   return .teal
+        case "indigo": return .indigo
+        case "purple": return .purple
         default:       return .gray
         }
     }
@@ -741,6 +966,10 @@ private extension View {
     func livePreviewSelectionShadow() -> some View {
         modifier(LivePreviewSelectionShadow())
     }
+
+    func livePreviewGroupShadow() -> some View {
+        modifier(LivePreviewGroupShadow())
+    }
 }
 
 private struct LivePreviewSelectionShadow: ViewModifier {
@@ -764,6 +993,26 @@ private struct LivePreviewSelectionShadow: ViewModifier {
                 color: isSelected ? Color.black.opacity(0.28) : .clear,
                 radius: isSelected ? 20 : 0,
                 y: isSelected ? 9 : 0
+            )
+    }
+}
+
+private struct LivePreviewGroupShadow: ViewModifier {
+    @Environment(\.isFlowNodeSelected) private var isSelected
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(
+                        isSelected ? Color.primary.opacity(0.22) : .clear,
+                        lineWidth: isSelected ? 1.5 : 0
+                    )
+            }
+            .shadow(
+                color: .black.opacity(isSelected ? 0.18 : 0.08),
+                radius: isSelected ? 18 : 4,
+                y: isSelected ? 8 : 1
             )
     }
 }

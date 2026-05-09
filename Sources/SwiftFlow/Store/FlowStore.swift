@@ -96,10 +96,97 @@ public final class FlowStore<Data: Sendable & Hashable> {
         rebuildConnectionLookup()
     }
 
+    // MARK: - Hierarchy
+
+    public func childNodes(of parentID: String?) -> [FlowNode<Data>] {
+        nodes.filter { $0.parentID == parentID }
+    }
+
+    public func childEdges(of parentID: String?) -> [FlowEdge] {
+        edges.filter { $0.parentID == parentID }
+    }
+
+    public func descendantNodeIDs(of nodeID: String) -> Set<String> {
+        var result = Set<String>()
+        collectDescendantNodeIDs(of: nodeID, into: &result)
+        return result
+    }
+
+    public func setParent(of nodeID: String, to parentID: String?) {
+        guard nodeLookup[nodeID] != nil else { return }
+        guard isValidNodeParent(parentID, for: nodeID) else { return }
+        updateNode(nodeID) { node in
+            node.parentID = parentID
+        }
+    }
+
+    public func setParent(ofEdge edgeID: String, to parentID: String?) {
+        guard isValidEdgeParent(parentID) else { return }
+        updateEdge(edgeID) { edge in
+            edge.parentID = parentID
+        }
+    }
+
+    @discardableResult
+    public func groupSelection(
+        id: String = UUID().uuidString,
+        data: Data,
+        padding: CGFloat = 24,
+        zIndex: Int? = nil
+    ) -> FlowNode<Data>? {
+        guard nodeLookup[id] == nil else { return nil }
+        let rootSelectedNodeIDs = topLevelNodeIDs(from: selectedNodeIDs)
+        guard !rootSelectedNodeIDs.isEmpty else { return nil }
+        let selectedNodes = nodes.filter { rootSelectedNodeIDs.contains($0.id) }
+        guard let bounds = union(selectedNodes.map(\.frame)) else { return nil }
+
+        let selectedNodeIDSet = Set(selectedNodes.map(\.id))
+        let containedEdgeIDs = Set(edges.filter { edge in
+            selectedEdgeIDs.contains(edge.id)
+                || (selectedNodeIDSet.contains(edge.sourceNodeID) && selectedNodeIDSet.contains(edge.targetNodeID))
+        }.map(\.id))
+
+        let groupFrame = bounds.insetBy(dx: -padding, dy: -padding)
+        let groupZIndex = zIndex ?? ((selectedNodes.map(\.zIndex).min() ?? 0) - 1)
+        let groupNode = FlowNode(
+            id: id,
+            position: groupFrame.origin,
+            size: groupFrame.size,
+            data: data,
+            acceptsChildren: true,
+            zIndex: groupZIndex,
+            handles: []
+        )
+
+        var oldParentIDs: [String: String?] = [:]
+        for nodeID in rootSelectedNodeIDs {
+            oldParentIDs.updateValue(nodeLookup[nodeID]?.parentID, forKey: nodeID)
+        }
+        var oldEdgeParentIDs: [String: String?] = [:]
+        for edgeID in containedEdgeIDs {
+            oldEdgeParentIDs.updateValue(edges.first(where: { $0.id == edgeID })?.parentID, forKey: edgeID)
+        }
+
+        withoutUndoRegistration {
+            addNode(groupNode)
+        }
+        applyParentIDs(Dictionary(uniqueKeysWithValues: rootSelectedNodeIDs.map { ($0, Optional(id)) }))
+        applyEdgeParentIDs(Dictionary(uniqueKeysWithValues: containedEdgeIDs.map { ($0, Optional(id)) }))
+        selectNode(id)
+
+        registerGroupSelectionUndo(
+            groupNode: groupNode,
+            oldParentIDs: oldParentIDs,
+            oldEdgeParentIDs: oldEdgeParentIDs
+        )
+        return groupNode
+    }
+
     // MARK: - Node Operations
 
     public func addNode(_ node: FlowNode<Data>) {
         guard nodeLookup[node.id] == nil else { return }
+        guard isValidNodeParent(node.parentID, for: node.id) else { return }
         nodes.append(node)
         nodeLookup[node.id] = node
         rebuildSortedNodes()
@@ -111,41 +198,55 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     public func removeNode(_ nodeID: String) {
-        nodePositionAnimations.removeValue(forKey: nodeID)
-        nodeSnapshots.removeValue(forKey: nodeID)
-        let capturedNode = nodeLookup[nodeID]
-        let cascadedEdges = edges.filter { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
+        let nodeIDsToRemove = nodeIDsIncludingDescendants(of: nodeID)
+        guard !nodeIDsToRemove.isEmpty else { return }
 
-        nodes.removeAll { $0.id == nodeID }
-        nodeLookup.removeValue(forKey: nodeID)
+        let capturedNodes = nodes.filter { nodeIDsToRemove.contains($0.id) }
+        let cascadedEdges = edges.filter { edge in
+            nodeIDsToRemove.contains(edge.sourceNodeID)
+                || nodeIDsToRemove.contains(edge.targetNodeID)
+                || edge.parentID.map { nodeIDsToRemove.contains($0) } == true
+        }
+
+        for removedNodeID in nodeIDsToRemove {
+            nodePositionAnimations.removeValue(forKey: removedNodeID)
+            nodeSnapshots.removeValue(forKey: removedNodeID)
+        }
+
+        nodes.removeAll { nodeIDsToRemove.contains($0.id) }
+        for removedNodeID in nodeIDsToRemove {
+            nodeLookup.removeValue(forKey: removedNodeID)
+        }
         rebuildSortedNodes()
 
-        selectedNodeIDs.remove(nodeID)
-        if focusedTarget == .node(nodeID) {
+        selectedNodeIDs.subtract(nodeIDsToRemove)
+        if case let .node(focusedNodeID) = focusedTarget,
+           nodeIDsToRemove.contains(focusedNodeID) {
             focusedTarget = nil
         }
-        if nodeDragSession?.startPositions[nodeID] != nil {
+        if nodeDragSession?.startPositions.keys.contains(where: { nodeIDsToRemove.contains($0) }) == true {
             nodeDragSession = nil
             clearActiveInteractionIfDragging()
         }
-        if hoveredNodeID == nodeID {
+        if hoveredNodeID.map({ nodeIDsToRemove.contains($0) }) == true {
             hoveredNodeID = nil
         }
-        if dropTargetNodeID == nodeID {
+        if dropTargetNodeID.map({ nodeIDsToRemove.contains($0) }) == true {
             dropTargetNodeID = nil
         }
-        if connectionDraft?.sourceNodeID == nodeID {
+        if connectionDraft.map({ nodeIDsToRemove.contains($0.sourceNodeID) }) == true {
             connectionDraft = nil
             clearActiveInteractionIfConnecting()
-        } else if connectionDraft?.targetNodeID == nodeID {
+        } else if connectionDraft?.targetNodeID.map({ nodeIDsToRemove.contains($0) }) == true {
             connectionDraft?.targetNodeID = nil
             connectionDraft?.targetHandleID = nil
         }
-        if activeInteractionContainsNode(nodeID) {
+        if nodeIDsToRemove.contains(where: activeInteractionContainsNode) {
             activeInteraction = nil
         }
 
-        edges.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
+        let cascadedEdgeIDs = Set(cascadedEdges.map(\.id))
+        edges.removeAll { cascadedEdgeIDs.contains($0.id) }
         rebuildConnectionLookup()
 
         for edge in cascadedEdges {
@@ -156,15 +257,19 @@ public final class FlowStore<Data: Sendable & Hashable> {
             }
         }
 
-        emitNodeChange(.remove(nodeID: nodeID))
+        for removedNodeID in nodeIDsToRemove {
+            emitNodeChange(.remove(nodeID: removedNodeID))
+        }
         if !cascadedEdges.isEmpty {
             onEdgesChange?(cascadedEdges.map { .remove(edgeID: $0.id) })
         }
 
-        if let capturedNode {
+        if !capturedNodes.isEmpty {
             registerUndo(actionName: "Remove") { store in
                 store.withoutUndoRegistration {
-                    store.addNode(capturedNode)
+                    for node in capturedNodes {
+                        store.addNode(node)
+                    }
                     for edge in cascadedEdges {
                         store.addEdge(edge)
                     }
@@ -259,12 +364,76 @@ public final class FlowStore<Data: Sendable & Hashable> {
         registerMoveUndo(from: startPositions, to: endPositions)
     }
 
-    private func registerMoveUndo(from: [String: CGPoint], to: [String: CGPoint]) {
+    private func completeNodeDrag(_ session: NodeDragSession) {
+        reconcileDraggedNodeParents(for: session)
+
+        var endPositions: [String: CGPoint] = [:]
+        for (nodeID, _) in session.startPositions {
+            if let node = nodeLookup[nodeID] {
+                endPositions[nodeID] = node.position
+            }
+        }
+
+        var endParentIDs: [String: String?] = [:]
+        for nodeID in session.startParentIDs.keys {
+            if let node = nodeLookup[nodeID] {
+                endParentIDs.updateValue(node.parentID, forKey: nodeID)
+            }
+        }
+
+        let positionChanged = session.startPositions.contains { id, pos in endPositions[id] != pos }
+        let parentChanged = session.startParentIDs.contains { id, parentID in
+            let endParentID = endParentIDs[id] ?? nil
+            return endParentID != parentID
+        }
+        guard positionChanged || parentChanged else { return }
+        registerMoveUndo(
+            from: session.startPositions,
+            to: endPositions,
+            parentIDsFrom: session.startParentIDs,
+            parentIDsTo: endParentIDs
+        )
+    }
+
+    private func registerMoveUndo(
+        from: [String: CGPoint],
+        to: [String: CGPoint],
+        parentIDsFrom: [String: String?] = [:],
+        parentIDsTo: [String: String?] = [:]
+    ) {
         registerUndo(actionName: "Move") { store in
             for (nodeID, pos) in from {
                 store.moveNode(nodeID, to: pos)
             }
-            store.registerMoveUndo(from: to, to: from)
+            store.applyParentIDs(parentIDsFrom)
+            store.registerMoveUndo(from: to, to: from, parentIDsFrom: parentIDsTo, parentIDsTo: parentIDsFrom)
+        }
+    }
+
+    private func registerGroupSelectionUndo(
+        groupNode: FlowNode<Data>,
+        oldParentIDs: [String: String?],
+        oldEdgeParentIDs: [String: String?]
+    ) {
+        registerUndo(actionName: "Group") { store in
+            store.withoutUndoRegistration {
+                store.applyParentIDs(oldParentIDs)
+                store.applyEdgeParentIDs(oldEdgeParentIDs)
+                store.removeNode(groupNode.id)
+            }
+            store.registerUndo(actionName: "Group") { store in
+                store.withoutUndoRegistration {
+                    store.addNode(groupNode)
+                }
+                store.applyParentIDs(Dictionary(uniqueKeysWithValues: oldParentIDs.keys.map { ($0, Optional(groupNode.id)) }))
+                store.applyEdgeParentIDs(Dictionary(uniqueKeysWithValues: oldEdgeParentIDs.keys.map { ($0, Optional(groupNode.id)) }))
+                store.selectNode(groupNode.id)
+                store.registerGroupSelectionUndo(
+                    groupNode: groupNode,
+                    oldParentIDs: oldParentIDs,
+                    oldEdgeParentIDs: oldEdgeParentIDs
+                )
+            }
         }
     }
 
@@ -288,17 +457,42 @@ public final class FlowStore<Data: Sendable & Hashable> {
             clearActiveInteractionIfDragging()
             return
         }
-        var startPositions: [String: CGPoint] = [:]
+        var selectedDragNodeIDs: Set<String> = []
         if node.isSelected, selectedNodeIDs.count > 1 {
             for id in selectedNodeIDs {
                 if let n = nodeLookup[id], n.isDraggable {
-                    startPositions[id] = n.position
+                    selectedDragNodeIDs.insert(id)
                 }
             }
         } else {
-            startPositions[nodeID] = node.position
+            selectedDragNodeIDs.insert(nodeID)
         }
-        nodeDragSession = NodeDragSession(startPositions: startPositions)
+        let rootNodeIDs = topLevelNodeIDs(from: selectedDragNodeIDs)
+
+        var dragNodeIDs = Set<String>()
+        for rootNodeID in rootNodeIDs {
+            dragNodeIDs.formUnion(nodeIDsIncludingDescendants(of: rootNodeID))
+        }
+
+        var startPositions: [String: CGPoint] = [:]
+        for id in dragNodeIDs {
+            if let n = nodeLookup[id] {
+                startPositions[id] = n.position
+            }
+        }
+
+        var startParentIDs: [String: String?] = [:]
+        for id in rootNodeIDs {
+            if let n = nodeLookup[id] {
+                startParentIDs.updateValue(n.parentID, forKey: id)
+            }
+        }
+
+        nodeDragSession = NodeDragSession(
+            startPositions: startPositions,
+            rootNodeIDs: rootNodeIDs,
+            startParentIDs: startParentIDs
+        )
         activeInteraction = .draggingNodes(Set(startPositions.keys))
     }
 
@@ -323,7 +517,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     /// entry via ``completeMoveNodes(from:)`` and clears the session.
     public func endNodeDrag() {
         guard let session = nodeDragSession else { return }
-        completeMoveNodes(from: session.startPositions)
+        completeNodeDrag(session)
         nodeDragSession = nil
         clearActiveInteractionIfDragging()
     }
@@ -402,14 +596,21 @@ public final class FlowStore<Data: Sendable & Hashable> {
     // MARK: - Delete Selection
 
     public func deleteSelection() {
-        let selectedNodes = nodes.filter { selectedNodeIDs.contains($0.id) }
-        let nodeIDsToRemove = Set(selectedNodes.map(\.id))
+        let rootSelectedNodeIDs = Set(nodes.filter { selectedNodeIDs.contains($0.id) }.map(\.id))
+        var nodeIDsToRemove = rootSelectedNodeIDs
+        for nodeID in rootSelectedNodeIDs {
+            nodeIDsToRemove.formUnion(descendantNodeIDs(of: nodeID))
+        }
+        let selectedNodes = nodes.filter { nodeIDsToRemove.contains($0.id) }
 
         var allEdgeIDsToRemove = selectedEdgeIDs
-        for node in selectedNodes {
-            for edge in edgesForNode(node.id) {
+        for nodeID in nodeIDsToRemove {
+            for edge in edgesForNode(nodeID) {
                 allEdgeIDsToRemove.insert(edge.id)
             }
+        }
+        for edge in edges where edge.parentID.map({ nodeIDsToRemove.contains($0) }) == true {
+            allEdgeIDsToRemove.insert(edge.id)
         }
         let allEdgesToRemove = edges.filter { allEdgeIDsToRemove.contains($0.id) }
 
@@ -421,7 +622,9 @@ public final class FlowStore<Data: Sendable & Hashable> {
         withoutUndoRegistration {
             let standaloneEdgeIDs = selectedEdgeIDs.filter { edgeID in
                 guard let edge = allEdgesToRemove.first(where: { $0.id == edgeID }) else { return false }
-                return !nodeIDsToRemove.contains(edge.sourceNodeID) && !nodeIDsToRemove.contains(edge.targetNodeID)
+                return !nodeIDsToRemove.contains(edge.sourceNodeID)
+                    && !nodeIDsToRemove.contains(edge.targetNodeID)
+                    && edge.parentID.map { !nodeIDsToRemove.contains($0) } != false
             }
             for edgeID in standaloneEdgeIDs {
                 removeEdge(edgeID)
@@ -464,6 +667,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         guard !edges.contains(where: { $0.id == edge.id }) else { return }
         guard nodeLookup[edge.sourceNodeID] != nil,
               nodeLookup[edge.targetNodeID] != nil else { return }
+        guard isValidEdgeParent(edge.parentID) else { return }
         edges.append(edge)
         connectionLookup[edge.sourceNodeID, default: []].append(edge)
         connectionLookup[edge.targetNodeID, default: []].append(edge)
@@ -1317,6 +1521,14 @@ public final class FlowStore<Data: Sendable & Hashable> {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
+    private func union(_ rects: [CGRect]) -> CGRect? {
+        guard var result = rects.first else { return nil }
+        for rect in rects.dropFirst() {
+            result = result.union(rect)
+        }
+        return result
+    }
+
     // MARK: - Undo Helpers
 
     private func registerUndo(actionName: String, handler: @escaping @MainActor @Sendable (FlowStore) -> Void) {
@@ -1383,6 +1595,118 @@ public final class FlowStore<Data: Sendable & Hashable> {
         case .bottom: CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y + node.size.height)
         case .left:   CGPoint(x: node.position.x, y: node.position.y + node.size.height / 2)
         case .right:  CGPoint(x: node.position.x + node.size.width, y: node.position.y + node.size.height / 2)
+        }
+    }
+
+    private func nodeIDsIncludingDescendants(of nodeID: String) -> Set<String> {
+        guard nodeLookup[nodeID] != nil else { return [] }
+        var result: Set<String> = [nodeID]
+        collectDescendantNodeIDs(of: nodeID, into: &result)
+        return result
+    }
+
+    private func topLevelNodeIDs(from nodeIDs: Set<String>) -> Set<String> {
+        nodeIDs.filter { nodeID in
+            var currentParentID = nodeLookup[nodeID]?.parentID
+            while let parentID = currentParentID {
+                if nodeIDs.contains(parentID) { return false }
+                currentParentID = nodeLookup[parentID]?.parentID
+            }
+            return true
+        }
+    }
+
+    private func collectDescendantNodeIDs(of nodeID: String, into result: inout Set<String>) {
+        for child in nodes where child.parentID == nodeID {
+            guard result.insert(child.id).inserted else { continue }
+            collectDescendantNodeIDs(of: child.id, into: &result)
+        }
+    }
+
+    private func reconcileDraggedNodeParents(for session: NodeDragSession) {
+        var parentIDs: [String: String?] = [:]
+        let excludedNodeIDs = Set(session.startPositions.keys)
+        for nodeID in session.rootNodeIDs {
+            guard let node = nodeLookup[nodeID] else { continue }
+            let parentID = containingParentID(for: node, excluding: excludedNodeIDs)
+            parentIDs.updateValue(parentID, forKey: nodeID)
+        }
+        applyParentIDs(parentIDs)
+    }
+
+    private func containingParentID(for node: FlowNode<Data>, excluding excludedNodeIDs: Set<String>) -> String? {
+        let center = CGPoint(x: node.frame.midX, y: node.frame.midY)
+        for index in nodeIndicesFrontToBack {
+            let candidate = nodes[index]
+            guard candidate.acceptsChildren else { continue }
+            guard !excludedNodeIDs.contains(candidate.id) else { continue }
+            guard candidate.frame.contains(center) else { continue }
+            guard isValidNodeParent(candidate.id, for: node.id) else { continue }
+            return candidate.id
+        }
+        return nil
+    }
+
+    private func applyParentIDs(_ parentIDs: [String: String?]) {
+        for (nodeID, parentID) in parentIDs {
+            guard isValidNodeParent(parentID, for: nodeID) else { continue }
+            guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { continue }
+            guard nodes[index].parentID != parentID else { continue }
+            nodes[index].parentID = parentID
+            nodeLookup[nodeID] = nodes[index]
+            emitNodeChange(.replace(nodes[index]))
+        }
+    }
+
+    private func applyEdgeParentIDs(_ parentIDs: [String: String?]) {
+        var changes: [EdgeChange] = []
+        for (edgeID, parentID) in parentIDs {
+            guard isValidEdgeParent(parentID) else { continue }
+            guard let index = edges.firstIndex(where: { $0.id == edgeID }) else { continue }
+            guard edges[index].parentID != parentID else { continue }
+            edges[index].parentID = parentID
+            changes.append(.replace(edges[index]))
+        }
+        if !changes.isEmpty {
+            onEdgesChange?(changes)
+        }
+    }
+
+    private func isValidNodeParent(_ parentID: String?, for nodeID: String) -> Bool {
+        guard let parentID else { return true }
+        guard parentID != nodeID else { return false }
+        guard let parent = nodeLookup[parentID], parent.acceptsChildren else { return false }
+
+        var visited: Set<String> = [nodeID]
+        var currentParentID: String? = parentID
+        while let currentID = currentParentID {
+            guard visited.insert(currentID).inserted else { return false }
+            currentParentID = nodeLookup[currentID]?.parentID
+        }
+        return true
+    }
+
+    private func isValidEdgeParent(_ parentID: String?) -> Bool {
+        guard let parentID else { return true }
+        return nodeLookup[parentID]?.acceptsChildren == true
+    }
+
+    private func normalizeHierarchyReferences() {
+        var changedNodes = false
+        for index in nodes.indices {
+            if !isValidNodeParent(nodes[index].parentID, for: nodes[index].id) {
+                nodes[index].parentID = nil
+                changedNodes = true
+            }
+        }
+        if changedNodes {
+            nodeLookup = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
+        }
+
+        for index in edges.indices {
+            if !isValidEdgeParent(edges[index].parentID) {
+                edges[index].parentID = nil
+            }
         }
     }
 
@@ -1472,11 +1796,21 @@ extension FlowStore where Data: Codable {
             exportedNodes[index].isDraggable = true
         }
         let exportedNodeIDs = Set(exportedNodes.map(\.id))
+        for index in exportedNodes.indices {
+            if let parentID = exportedNodes[index].parentID,
+               !exportedNodeIDs.contains(parentID) {
+                exportedNodes[index].parentID = nil
+            }
+        }
         var exportedEdges = edges.filter {
             exportedNodeIDs.contains($0.sourceNodeID) && exportedNodeIDs.contains($0.targetNodeID)
         }
         for index in exportedEdges.indices {
             exportedEdges[index].isSelected = false
+            if let parentID = exportedEdges[index].parentID,
+               !exportedNodeIDs.contains(parentID) {
+                exportedEdges[index].parentID = nil
+            }
         }
         return FlowDocument(
             nodes: exportedNodes,
@@ -1531,6 +1865,7 @@ extension FlowStore where Data: Codable {
         self.connectionDraft = nil
         self.selectionRect = nil
         rebuildNodeLookup()
+        normalizeHierarchyReferences()
 
         // Filter out edges with duplicate IDs or dangling node references
         var seenEdgeIDs = Set<String>()
@@ -1538,6 +1873,7 @@ extension FlowStore where Data: Codable {
             if !seenEdgeIDs.insert(edge.id).inserted { return true }
             if nodeLookup[edge.sourceNodeID] == nil { return true }
             if nodeLookup[edge.targetNodeID] == nil { return true }
+            if let parentID = edge.parentID, nodeLookup[parentID] == nil { return true }
             return false
         }
 
@@ -1553,6 +1889,8 @@ extension FlowStore where Data: Codable {
 /// by `endNodeDrag()` to register a single multi-node undo entry.
 struct NodeDragSession: Sendable {
     let startPositions: [String: CGPoint]
+    let rootNodeIDs: Set<String>
+    let startParentIDs: [String: String?]
 }
 
 private extension FlowStore {

@@ -177,6 +177,30 @@ struct FlowStoreUndoTests {
         #expect(store.nodeLookup["n1"]?.position == CGPoint(x: 100, y: 200))
     }
 
+    @Test("Undo groupSelection removes group and restores parents")
+    func undoGroupSelection() {
+        let (store, undoManager) = makeStore()
+        store.undoManager = nil
+        store.addNode(FlowNode(id: "n1", position: CGPoint(x: 10, y: 20), data: "A"))
+        store.addNode(FlowNode(id: "n2", position: CGPoint(x: 120, y: 20), data: "B"))
+        store.addEdge(FlowEdge(id: "e1", sourceNodeID: "n1", targetNodeID: "n2"))
+        store.selectNode("n1")
+        store.selectNode("n2", exclusive: false)
+        store.undoManager = undoManager
+
+        store.groupSelection(id: "group", data: "Group")
+        #expect(store.nodeLookup["group"] != nil)
+        #expect(store.nodeLookup["n1"]?.parentID == "group")
+        #expect(store.nodeLookup["n2"]?.parentID == "group")
+        #expect(store.edges.first?.parentID == "group")
+
+        undoManager.undo()
+        #expect(store.nodeLookup["group"] == nil)
+        #expect(store.nodeLookup["n1"]?.parentID == nil)
+        #expect(store.nodeLookup["n2"]?.parentID == nil)
+        #expect(store.edges.first?.parentID == nil)
+    }
+
     @Test("completeMoveNodes is no-op when positions unchanged")
     func moveNodesNoChange() {
         let (store, undoManager) = makeStore()

@@ -18,6 +18,8 @@ public struct FlowCanvas<
     private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
     private var accessoryAnimation: Animation? = .spring(duration: 0.25, bounce: 0.05)
+    private var selectionDecorationDrawers: [SelectionDecorationDrawer<NodeData>] = []
+    private var selectionAccessoryBuilders: [SelectionAccessoryBuilder<NodeData>] = []
     private var liveNodeInteractionPredicate: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool = { node, store in
         store.hoveredNodeID == node.id
     }
@@ -131,6 +133,40 @@ public struct FlowCanvas<
         copy.edgeAccessoryBuilder = { edge in AnyView(content(edge)) }
         copy.edgeAccessoryPlacement = placement
         copy.accessoryAnimation = animation
+        return copy
+    }
+
+    /// Adds a Canvas-synchronized decoration for the current selection.
+    ///
+    /// Use this for selection bounds, grouping backgrounds, halos, guides,
+    /// or other visuals that must move in the same render pass as nodes and
+    /// edges during pan and zoom.
+    public func selectionDecoration(
+        layer: SelectionDecorationLayer = .overlay,
+        _ draw: @escaping (inout GraphicsContext, FlowSelectionContext<NodeData>) -> Void
+    ) -> FlowCanvas {
+        var copy = self
+        copy.selectionDecorationDrawers.append(
+            SelectionDecorationDrawer(layer: layer, draw: draw)
+        )
+        return copy
+    }
+
+    /// Adds a SwiftUI view layer that receives the current selection context.
+    ///
+    /// The builder owns its own positioning. Use `boundsInScreen`,
+    /// `nodeFramesInScreen`, and `edgeFramesInScreen` from the context to
+    /// place controls or richer overlays.
+    public func selectionAccessory<A: View>(
+        layer: SelectionAccessoryLayer = .overlay,
+        @ViewBuilder content: @escaping (FlowSelectionContext<NodeData>) -> A
+    ) -> FlowCanvas {
+        var copy = self
+        copy.selectionAccessoryBuilders.append(
+            SelectionAccessoryBuilder(layer: layer) { context in
+                AnyView(content(context))
+            }
+        )
         return copy
     }
 
@@ -275,13 +311,19 @@ public struct FlowCanvas<
     @ViewBuilder
     private func canvasBody(in size: CGSize) -> some View {
         let canvasView = Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { context, canvasSize in
+            let selectionContext = SelectionContextResolver.resolve(
+                store: store,
+                canvasSize: canvasSize
+            )
             drawBackground(context: &context, canvasSize: canvasSize)
+            drawSelectionDecorations(layer: .background, context: &context, selection: selectionContext)
             if edgeContentBuilder != nil {
                 drawEdgesViaSymbols(context: &context, canvasSize: canvasSize)
             } else {
                 drawEdgesViaGraphicsContext(context: &context, canvasSize: canvasSize)
             }
             drawNodes(context: &context, canvasSize: canvasSize)
+            drawSelectionDecorations(layer: .overlay, context: &context, selection: selectionContext)
             drawSelectionRect(context: &context)
             drawConnectionDraft(context: &context, canvasSize: canvasSize)
         } symbols: {
@@ -413,6 +455,12 @@ public struct FlowCanvas<
         }
 
         ZStack {
+            SelectionAccessoryLayerView(
+                store: store,
+                canvasSize: size,
+                layer: .background,
+                builders: selectionAccessoryBuilders
+            )
             hostView
             LiveNodeOverlay(
                 store: store,
@@ -434,6 +482,12 @@ public struct FlowCanvas<
                     animation: accessoryAnimation
                 )
             }
+            SelectionAccessoryLayerView(
+                store: store,
+                canvasSize: size,
+                layer: .overlay,
+                builders: selectionAccessoryBuilders
+            )
         }
         .environment(\.flowLiveNodeSnapshotWriter, snapshotWriter)
         #else
@@ -462,6 +516,12 @@ public struct FlowCanvas<
         }
 
         ZStack {
+            SelectionAccessoryLayerView(
+                store: store,
+                canvasSize: size,
+                layer: .background,
+                builders: selectionAccessoryBuilders
+            )
             hostView
             LiveNodeOverlay(
                 store: store,
@@ -483,9 +543,26 @@ public struct FlowCanvas<
                     animation: accessoryAnimation
                 )
             }
+            SelectionAccessoryLayerView(
+                store: store,
+                canvasSize: size,
+                layer: .overlay,
+                builders: selectionAccessoryBuilders
+            )
         }
         .environment(\.flowLiveNodeSnapshotWriter, snapshotWriter)
         #endif
+    }
+
+    private func drawSelectionDecorations(
+        layer: SelectionDecorationLayer,
+        context: inout GraphicsContext,
+        selection: FlowSelectionContext<NodeData>?
+    ) {
+        guard let selection else { return }
+        for drawer in selectionDecorationDrawers where drawer.layer == layer {
+            drawer.draw(&context, selection)
+        }
     }
 
     // MARK: - Drawing: Background

@@ -7,6 +7,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
     public var sourceHandleID: String?
     public var targetNodeID: String
     public var targetHandleID: String?
+    public var parentID: String?
     public var pathType: EdgePathType
     public var isSelected: Bool
     public var isDropTarget: Bool
@@ -18,6 +19,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         sourceHandleID: String? = nil,
         targetNodeID: String,
         targetHandleID: String? = nil,
+        parentID: String? = nil,
         pathType: EdgePathType = .bezier,
         isSelected: Bool = false,
         label: String? = nil
@@ -27,6 +29,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         self.sourceHandleID = sourceHandleID
         self.targetNodeID = targetNodeID
         self.targetHandleID = targetHandleID
+        self.parentID = parentID
         self.pathType = pathType
         self.isSelected = isSelected
         self.isDropTarget = false
@@ -37,7 +40,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
 extension FlowEdge {
 
     private enum CodingKeys: String, CodingKey {
-        case id, sourceNodeID, sourceHandleID, targetNodeID, targetHandleID, pathType, isSelected, label
+        case id, sourceNodeID, sourceHandleID, targetNodeID, targetHandleID, parentID, pathType, isSelected, label
     }
 
     public init(from decoder: Decoder) throws {
@@ -47,6 +50,7 @@ extension FlowEdge {
         sourceHandleID = try container.decodeIfPresent(String.self, forKey: .sourceHandleID)
         targetNodeID = try container.decode(String.self, forKey: .targetNodeID)
         targetHandleID = try container.decodeIfPresent(String.self, forKey: .targetHandleID)
+        parentID = try container.decodeIfPresent(String.self, forKey: .parentID)
         pathType = try container.decodeIfPresent(EdgePathType.self, forKey: .pathType) ?? .bezier
         isSelected = try container.decodeIfPresent(Bool.self, forKey: .isSelected) ?? false
         isDropTarget = false
@@ -60,6 +64,7 @@ extension FlowEdge {
         try container.encodeIfPresent(sourceHandleID, forKey: .sourceHandleID)
         try container.encode(targetNodeID, forKey: .targetNodeID)
         try container.encodeIfPresent(targetHandleID, forKey: .targetHandleID)
+        try container.encodeIfPresent(parentID, forKey: .parentID)
         try container.encode(pathType, forKey: .pathType)
         try container.encode(isSelected, forKey: .isSelected)
         try container.encodeIfPresent(label, forKey: .label)

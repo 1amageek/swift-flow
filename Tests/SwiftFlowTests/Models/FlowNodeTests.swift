@@ -15,6 +15,7 @@ struct FlowNodeTests {
         #expect(node.isSelected == false)
         #expect(node.isHovered == false)
         #expect(node.isDraggable == true)
+        #expect(node.acceptsChildren == false)
         #expect(node.zIndex == 0)
     }
 
@@ -47,6 +48,7 @@ struct FlowNodeTests {
             data: "TestData",
             isSelected: true,
             isDraggable: false,
+            acceptsChildren: true,
             zIndex: 5
         )
         let encoder = JSONEncoder()

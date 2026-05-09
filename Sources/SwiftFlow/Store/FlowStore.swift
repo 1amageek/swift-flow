@@ -281,6 +281,96 @@ public final class FlowStore<Data: Sendable & Hashable> {
         }
     }
 
+    @discardableResult
+    public func ungroupNode(_ nodeID: String) -> Bool {
+        guard let groupNode = nodeLookup[nodeID] else { return false }
+
+        let replacementParentID = groupNode.parentID
+        let childNodeIDs = Set(nodes.filter { $0.parentID == nodeID }.map(\.id))
+        let childEdgeIDs = Set(edges.filter { $0.parentID == nodeID }.map(\.id))
+        let removedEdges = edges.filter {
+            $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID
+        }
+        let removedEdgeIDs = Set(removedEdges.map(\.id))
+        let oldChildParentIDs = Dictionary(uniqueKeysWithValues: childNodeIDs.map { ($0, Optional(nodeID)) })
+        let oldEdgeParentIDs = Dictionary(uniqueKeysWithValues: childEdgeIDs.map { ($0, Optional(nodeID)) })
+
+        nodePositionAnimations.removeValue(forKey: nodeID)
+        nodeSnapshots.removeValue(forKey: nodeID)
+
+        nodes.removeAll { $0.id == nodeID }
+        nodeLookup.removeValue(forKey: nodeID)
+
+        var nodeChanges: [NodeChange<Data>] = [.remove(nodeID: nodeID)]
+        for index in nodes.indices where nodes[index].parentID == nodeID {
+            nodes[index].parentID = replacementParentID
+            nodeLookup[nodes[index].id] = nodes[index]
+            nodeChanges.append(.replace(nodes[index]))
+        }
+        rebuildSortedNodes()
+
+        var edgeChanges: [EdgeChange] = []
+        edges.removeAll { edge in
+            if removedEdgeIDs.contains(edge.id) {
+                edgeChanges.append(.remove(edgeID: edge.id))
+                return true
+            }
+            return false
+        }
+        for index in edges.indices where edges[index].parentID == nodeID {
+            edges[index].parentID = replacementParentID
+            edgeChanges.append(.replace(edges[index]))
+        }
+        rebuildConnectionLookup()
+
+        selectedNodeIDs.remove(nodeID)
+        selectedEdgeIDs.subtract(removedEdgeIDs)
+        animatedEdgeIDs.subtract(removedEdgeIDs)
+        if focusedTarget == .node(nodeID) {
+            focusedTarget = nil
+        }
+        if hoveredNodeID == nodeID {
+            hoveredNodeID = nil
+        }
+        if dropTargetNodeID == nodeID {
+            dropTargetNodeID = nil
+        }
+        if connectionDraft?.sourceNodeID == nodeID {
+            connectionDraft = nil
+            clearActiveInteractionIfConnecting()
+        } else if connectionDraft?.targetNodeID == nodeID {
+            connectionDraft?.targetNodeID = nil
+            connectionDraft?.targetHandleID = nil
+        }
+        if activeInteractionContainsNode(nodeID) {
+            activeInteraction = nil
+        }
+        for edgeID in removedEdgeIDs where focusedTarget == .edge(edgeID) {
+            focusedTarget = nil
+        }
+
+        emitNodeChanges(nodeChanges)
+        if !edgeChanges.isEmpty {
+            onEdgesChange?(edgeChanges)
+        }
+
+        registerUndo(actionName: "Ungroup") { store in
+            store.withoutUndoRegistration {
+                store.addNode(groupNode)
+                store.applyParentIDs(oldChildParentIDs)
+                store.applyEdgeParentIDs(oldEdgeParentIDs)
+                for edge in removedEdges {
+                    store.addEdge(edge)
+                }
+            }
+            store.registerUndo(actionName: "Ungroup") { store in
+                store.ungroupNode(nodeID)
+            }
+        }
+
+        return true
+    }
+
     public func moveNode(_ nodeID: String, to position: CGPoint) {
         nodePositionAnimations.removeValue(forKey: nodeID)
         let snapped = configuration.snapped(position)

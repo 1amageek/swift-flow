@@ -50,6 +50,26 @@ struct FlowStoreHierarchyTests {
         #expect(store.edges.map(\.id) == ["outside"])
     }
 
+    @Test("Ungroup removes only the container and reparents direct children")
+    func ungroupRemovesContainerOnly() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(id: "root", position: .zero, data: "Root", acceptsChildren: true))
+        store.addNode(FlowNode(id: "group", position: CGPoint(x: 10, y: 10), data: "Group", parentID: "root", acceptsChildren: true))
+        store.addNode(FlowNode(id: "child", position: CGPoint(x: 20, y: 20), data: "Child", parentID: "group", acceptsChildren: true))
+        store.addNode(FlowNode(id: "nested", position: CGPoint(x: 30, y: 30), data: "Nested", parentID: "child"))
+        store.addEdge(FlowEdge(id: "inside", sourceNodeID: "child", targetNodeID: "nested", parentID: "group"))
+        store.addEdge(FlowEdge(id: "group-edge", sourceNodeID: "group", targetNodeID: "child", parentID: "group"))
+
+        let didUngroup = store.ungroupNode("group")
+
+        #expect(didUngroup)
+        #expect(store.nodeLookup["group"] == nil)
+        #expect(store.nodeLookup["child"]?.parentID == "root")
+        #expect(store.nodeLookup["nested"]?.parentID == "child")
+        #expect(store.edges.first(where: { $0.id == "inside" })?.parentID == "root")
+        #expect(store.edges.contains { $0.id == "group-edge" } == false)
+    }
+
     @Test("Dragging a parent node moves every descendant")
     func dragParentMovesDescendants() {
         let store = FlowStore<String>()

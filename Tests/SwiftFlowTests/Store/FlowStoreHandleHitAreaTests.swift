@@ -86,4 +86,30 @@ struct FlowStoreHandleHitAreaTests {
         #expect(target?.handleID == "target")
         #expect(store.hitTestHandle(at: pointInsideTarget) == nil)
     }
+
+    @Test("Beginning a connection selects the source node")
+    func beginConnectionSelectsSourceNode() {
+        let store = FlowStore<String>()
+        store.addNode(FlowNode(
+            id: "source",
+            position: .zero,
+            data: "Source",
+            handles: [
+                HandleDeclaration(id: "out", type: .source, position: .center)
+            ]
+        ))
+        store.addNode(FlowNode(id: "other", position: CGPoint(x: 120, y: 0), data: "Other"))
+        store.selectNode("other")
+
+        store.beginConnection(
+            nodeID: "source",
+            handleID: "out",
+            handleType: .source,
+            handlePosition: .center
+        )
+
+        #expect(store.selectedNodeIDs == ["source"])
+        #expect(store.nodeLookup["source"]?.isSelected == true)
+        #expect(store.nodeLookup["other"]?.isSelected == false)
+    }
 }

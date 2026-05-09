@@ -23,6 +23,7 @@ public struct FlowCanvas<
     private var liveNodeInteractionPredicate: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool = { node, store in
         store.hoveredNodeID == node.id
     }
+    private var deleteActionHandler: ((FlowStore<NodeData>) -> Bool)?
     private var registeredDropTypes: [String] = []
     private var dropHandler: (@MainActor @Sendable (_ event: CanvasDropEvent) -> Bool)? = nil
 
@@ -167,6 +168,14 @@ public struct FlowCanvas<
                 AnyView(content(context))
             }
         )
+        return copy
+    }
+
+    /// Overrides how the canvas handles Delete / Forward Delete while it
+    /// has keyboard focus. Return `true` when the key was handled.
+    public func deleteAction(_ action: @escaping (FlowStore<NodeData>) -> Bool) -> FlowCanvas {
+        var copy = self
+        copy.deleteActionHandler = action
         return copy
     }
 
@@ -322,10 +331,10 @@ public struct FlowCanvas<
             } else {
                 drawEdgesViaGraphicsContext(context: &context, canvasSize: canvasSize)
             }
+            drawConnectionDraft(context: &context, canvasSize: canvasSize)
             drawNodes(context: &context, canvasSize: canvasSize)
             drawSelectionDecorations(layer: .overlay, context: &context, selection: selectionContext)
             drawSelectionRect(context: &context)
-            drawConnectionDraft(context: &context, canvasSize: canvasSize)
         } symbols: {
             ForEach(store.nodes) { node in
                 let context = nodeRenderContext(for: node)
@@ -447,8 +456,8 @@ public struct FlowCanvas<
             },
             registeredDropTypes: registeredDropTypes,
             onDrop: dropHandler,
-            onKeyDown: { _ in
-                return false
+            onKeyDown: { keyCode in
+                handleKeyDown(keyCode)
             }
         ) {
             canvasView
@@ -552,6 +561,17 @@ public struct FlowCanvas<
         }
         .environment(\.flowLiveNodeSnapshotWriter, snapshotWriter)
         #endif
+    }
+
+    private func handleKeyDown(_ keyCode: UInt16) -> Bool {
+        guard keyCode == 51 || keyCode == 117 else { return false }
+        if let deleteActionHandler {
+            return deleteActionHandler(store)
+        }
+        let hasSelection = !store.selectedNodeIDs.isEmpty || !store.selectedEdgeIDs.isEmpty
+        guard hasSelection else { return false }
+        store.deleteSelection()
+        return true
     }
 
     private func drawSelectionDecorations(

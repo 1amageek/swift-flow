@@ -1439,6 +1439,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     func beginConnection(nodeID: String, handleID: String?, handleType: HandleType, handlePosition: HandlePosition) {
         guard connectionDraft == nil else { return }
+        selectNode(nodeID)
         connectionDraft = ConnectionDraft(
             sourceNodeID: nodeID,
             sourceHandleID: handleID,

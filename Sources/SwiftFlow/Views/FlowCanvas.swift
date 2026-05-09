@@ -17,7 +17,7 @@ public struct FlowCanvas<
     private var edgeAccessoryBuilder: ((FlowEdge) -> AnyView)?
     private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
-    private var accessoryAnimation: Animation? = .spring(duration: 0.25, bounce: 0.05)
+    private var accessoryAnimation: Animation? = .easeOut(duration: 0.16)
     private var selectionDecorationDrawers: [SelectionDecorationDrawer<NodeData>] = []
     private var selectionAccessoryBuilders: [SelectionAccessoryBuilder<NodeData>] = []
     private var liveNodeInteractionPredicate: (FlowNode<NodeData>, FlowStore<NodeData>) -> Bool = { node, store in
@@ -93,7 +93,7 @@ public struct FlowCanvas<
     ///   - content: A view builder receiving the selected node.
     public func nodeAccessory<A: View>(
         placement: AccessoryPlacement = .top,
-        animation: Animation? = .spring(duration: 0.25, bounce: 0.05),
+        animation: Animation? = .easeOut(duration: 0.16),
         @ViewBuilder content: @escaping (FlowNode<NodeData>) -> A
     ) -> FlowCanvas {
         var copy = self
@@ -107,7 +107,7 @@ public struct FlowCanvas<
     /// placement determined by the `placement` closure.
     public func nodeAccessory<A: View>(
         placement: @escaping (FlowNode<NodeData>) -> AccessoryPlacement,
-        animation: Animation? = .spring(duration: 0.25, bounce: 0.05),
+        animation: Animation? = .easeOut(duration: 0.16),
         @ViewBuilder content: @escaping (FlowNode<NodeData>) -> A
     ) -> FlowCanvas {
         var copy = self
@@ -127,7 +127,7 @@ public struct FlowCanvas<
     ///   - content: A view builder receiving the selected edge.
     public func edgeAccessory<A: View>(
         placement: AccessoryPlacement = .top,
-        animation: Animation? = .spring(duration: 0.25, bounce: 0.05),
+        animation: Animation? = .easeOut(duration: 0.16),
         @ViewBuilder content: @escaping (FlowEdge) -> A
     ) -> FlowCanvas {
         var copy = self

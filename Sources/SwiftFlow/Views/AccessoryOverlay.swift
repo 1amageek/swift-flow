@@ -73,12 +73,7 @@ struct AccessoryOverlay<NodeData: Sendable & Hashable>: View {
                     }
                     .position(clampedPos)
                     .id(content.id)
-                    .transition(
-                        AccessoryTransition(
-                            anchor: content.anchor,
-                            canvasSize: canvasSize
-                        )
-                    )
+                    .transition(AccessoryTransition())
             }
         }
         .animation(animation, value: measured)
@@ -156,32 +151,15 @@ struct AccessoryOverlay<NodeData: Sendable & Hashable>: View {
 
 // MARK: - Accessory Transition
 
-/// Custom transition that scales and fades the accessory from/to the
-/// node center.
+/// Subtle fade transition for accessory views.
 ///
-/// After `.position()`, the view's frame equals the parent (canvasSize).
-/// By computing the node center as a `UnitPoint` within that frame and
-/// passing it to `.scaleEffect(anchor:)`, the scale transformation
-/// naturally pulls the content toward / pushes it away from the node.
-///
-/// - Insertion: content grows from near-zero at the node center to full
-///   size at its clamped position, while fading in.
-/// - Removal: reverses back toward the node center.
+/// Accessories often host AppKit/UIKit-backed controls such as text editors,
+/// so this transition avoids large scale or travel transforms that can
+/// destabilize first-responder and insertion-point drawing during mount.
 struct AccessoryTransition: Transition {
-    /// Node (or edge label) center in screen coordinates.
-    let anchor: CGPoint
-    /// Size of the parent coordinate space (matches the view frame
-    /// produced by `.position()`).
-    let canvasSize: CGSize
-
     func body(content: Content, phase: TransitionPhase) -> some View {
-        // Convert screen-space anchor to a UnitPoint in the parent frame.
-        let scaleAnchor = UnitPoint(
-            x: canvasSize.width > 0 ? anchor.x / canvasSize.width : 0.5,
-            y: canvasSize.height > 0 ? anchor.y / canvasSize.height : 0.5
-        )
         content
-            .scaleEffect(phase.isIdentity ? 1 : 0.01, anchor: scaleAnchor)
+            .scaleEffect(phase.isIdentity ? 1 : 0.985)
             .opacity(phase.isIdentity ? 1 : 0)
     }
 }

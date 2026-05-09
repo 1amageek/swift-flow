@@ -49,7 +49,23 @@ struct FlowNodeTests {
             isSelected: true,
             isDraggable: false,
             acceptsChildren: true,
-            zIndex: 5
+            zIndex: 5,
+            handles: [
+                HandleDeclaration(
+                    id: "source",
+                    type: .source,
+                    position: .center,
+                    connectionStartArea: .nodeBorder(width: 6),
+                    connectionTargetArea: .disabled
+                ),
+                HandleDeclaration(
+                    id: "target",
+                    type: .target,
+                    position: .center,
+                    connectionStartArea: .disabled,
+                    connectionTargetArea: .node
+                )
+            ]
         )
         let encoder = JSONEncoder()
         let data = try encoder.encode(node)

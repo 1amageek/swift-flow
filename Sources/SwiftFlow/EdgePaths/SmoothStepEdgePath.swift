@@ -43,6 +43,7 @@ public struct SmoothStepEdgePath: EdgePathCalculating, Sendable {
 
     private func extendedPoint(_ point: CGPoint, position: HandlePosition, offset: CGFloat) -> CGPoint {
         switch position {
+        case .center: point
         case .top: CGPoint(x: point.x, y: point.y - offset)
         case .bottom: CGPoint(x: point.x, y: point.y + offset)
         case .left: CGPoint(x: point.x - offset, y: point.y)

@@ -344,6 +344,7 @@ private struct PreviewNode: View {
 
     private func handleAlignment(_ position: HandlePosition) -> Alignment {
         switch position {
+        case .center: .center
         case .top: .top
         case .bottom: .bottom
         case .left: .leading

@@ -30,6 +30,7 @@ public struct SimpleBezierEdgePath: EdgePathCalculating, Sendable {
 
     private func controlOffset(for position: HandlePosition, distance: CGFloat) -> CGPoint {
         switch position {
+        case .center: CGPoint(x: 0, y: 0)
         case .top: CGPoint(x: 0, y: -distance)
         case .bottom: CGPoint(x: 0, y: distance)
         case .left: CGPoint(x: -distance, y: 0)

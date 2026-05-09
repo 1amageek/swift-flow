@@ -1408,7 +1408,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         guard let handleID else {
             return HandleInfo(
                 point: CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y + node.size.height / 2),
-                position: .right,
+                position: .center,
                 type: .source
             )
         }
@@ -1422,12 +1422,15 @@ public final class FlowStore<Data: Sendable & Hashable> {
         var bestDistance: CGFloat = threshold
         var bestResult: (nodeID: String, handleID: String)?
 
-        for node in nodes {
+        for index in nodeIndicesFrontToBack {
+            let node = nodes[index]
             guard node.id != excludingNodeID else { continue }
             for handle in node.handles {
                 guard handle.type == targetType else { continue }
-                let point = handlePoint(for: handle.position, in: node)
-                let distance = hypot(canvasPoint.x - point.x, canvasPoint.y - point.y)
+                let area = handle.connectionTargetArea ?? .point(radius: threshold)
+                guard let distance = hitDistance(from: canvasPoint, to: handle, in: node, area: area) else {
+                    continue
+                }
                 if distance < bestDistance {
                     bestDistance = distance
                     bestResult = (nodeID: node.id, handleID: handle.id)
@@ -1447,8 +1450,10 @@ public final class FlowStore<Data: Sendable & Hashable> {
         for index in nodeIndicesFrontToBack {
             let node = nodes[index]
             for handle in node.handles {
-                let point = handlePoint(for: handle.position, in: node)
-                let distance = hypot(canvasPoint.x - point.x, canvasPoint.y - point.y)
+                let area = handle.connectionStartArea ?? .point(radius: threshold)
+                guard let distance = hitDistance(from: canvasPoint, to: handle, in: node, area: area) else {
+                    continue
+                }
                 if distance < bestDistance {
                     bestDistance = distance
                     bestResult = HandleHitResult(
@@ -1591,10 +1596,35 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     private func handlePoint(for position: HandlePosition, in node: FlowNode<Data>) -> CGPoint {
         switch position {
+        case .center: CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y + node.size.height / 2)
         case .top:    CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y)
         case .bottom: CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y + node.size.height)
         case .left:   CGPoint(x: node.position.x, y: node.position.y + node.size.height / 2)
         case .right:  CGPoint(x: node.position.x + node.size.width, y: node.position.y + node.size.height / 2)
+        }
+    }
+
+    private func hitDistance(
+        from point: CGPoint,
+        to handle: HandleDeclaration,
+        in node: FlowNode<Data>,
+        area: HandleHitArea
+    ) -> CGFloat? {
+        switch area {
+        case .disabled:
+            return nil
+        case .point(let radius):
+            let handlePoint = handlePoint(for: handle.position, in: node)
+            let distance = hypot(point.x - handlePoint.x, point.y - handlePoint.y)
+            return distance <= radius ? distance : nil
+        case .node:
+            guard node.frame.contains(point) else { return nil }
+            return 0
+        case .nodeBorder(let width):
+            let outer = node.frame.insetBy(dx: -width, dy: -width)
+            let inner = node.frame.insetBy(dx: width, dy: width)
+            guard outer.contains(point), !inner.contains(point) else { return nil }
+            return 0
         }
     }
 

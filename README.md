@@ -15,7 +15,7 @@ Edges are batch-drawn via `GraphicsContext` for performance. Nodes are rendered 
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.19.0")
+    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.20.0")
 ]
 ```
 
@@ -86,7 +86,7 @@ FlowNode(
 
 #### Handles
 
-Handles are connection points on a node. Each handle has an `id`, a `type` (.source or .target), and a `position` (.top, .bottom, .left, .right).
+Handles are connection points on a node. Each handle has an `id`, a `type` (.source or .target), and a `position` (.center, .top, .bottom, .left, .right).
 
 - `.source` handles can connect **to** `.target` handles
 - `.target` handles can receive connections **from** `.source` handles
@@ -97,6 +97,27 @@ Default handles are `target` at top and `source` at bottom (vertical flow). Over
 let horizontalHandles = [
     HandleDeclaration(id: "target", type: .target, position: .left),
     HandleDeclaration(id: "source", type: .source, position: .right),
+]
+```
+
+Connection hit areas are independent from the edge endpoint position. This lets an app keep the edge endpoint at the node center while accepting drops across the whole node, or start connections only from a narrow border band:
+
+```swift
+let nodeWideHandles = [
+    HandleDeclaration(
+        id: "source",
+        type: .source,
+        position: .center,
+        connectionStartArea: .nodeBorder(width: 6),
+        connectionTargetArea: .disabled
+    ),
+    HandleDeclaration(
+        id: "target",
+        type: .target,
+        position: .center,
+        connectionStartArea: .disabled,
+        connectionTargetArea: .node
+    ),
 ]
 ```
 

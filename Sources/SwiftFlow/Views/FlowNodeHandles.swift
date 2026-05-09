@@ -62,6 +62,8 @@ public struct FlowNodeHandles<NodeData: Sendable & Hashable>: View {
         let radius = FlowHandle.diameter / 2
 
         switch handlePosition {
+        case .center:
+            return CGPoint(x: size.width / 2, y: size.height / 2)
         case .top:
             return CGPoint(x: size.width / 2, y: radius)
         case .bottom:

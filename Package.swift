@@ -16,7 +16,8 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SwiftFlow"
+            name: "SwiftFlow",
+            exclude: ["DESIGN.md", "Views/DESIGN.md"]
         ),
         .testTarget(
             name: "SwiftFlowTests",

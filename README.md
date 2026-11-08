@@ -788,6 +788,15 @@ FlowCanvas(store: store) { node, context in
 
 Drop-target edges are drawn with an accent-colored stroke automatically by the built-in edge renderer. The store also exposes `dropTargetNodeID` and `dropTargetEdgeID` for reading the current target.
 
+## Canvas Overlay
+
+Use `.canvasOverlay { ... }` for interactive content positioned in Canvas-local
+screen coordinates, such as connection-label buttons. Content is hosted inside
+the platform event host, above the batch Canvas and below live nodes and selection
+accessories. On macOS, unconsumed wheel events reach the existing Canvas viewport
+handler. Controls that consume scrolling keep their own behavior. An ordinary
+outer SwiftUI `.overlay` sits outside that host's responder chain.
+
 ## Accessory Views
 
 Attach floating views near selected nodes or edges. Accessory views appear/disappear with animation when selection changes.

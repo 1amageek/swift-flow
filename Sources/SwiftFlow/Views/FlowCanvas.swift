@@ -15,6 +15,7 @@ public struct FlowCanvas<
     private let nodeContentBuilder: (FlowNode<NodeData>, NodeRenderContext) -> NodeView
     private let edgeContentBuilder: ((FlowEdge, EdgeGeometry) -> AnyView)?
     private var nodeAccessoryBuilder: ((FlowNode<NodeData>) -> AnyView)?
+    private var canvasOverlayBuilder: (() -> AnyView)? = nil
     private var edgeAccessoryBuilder: ((FlowEdge) -> AnyView)?
     private var nodeAccessoryPlacement: (FlowNode<NodeData>) -> AccessoryPlacement = { _ in .top }
     private var edgeAccessoryPlacement: AccessoryPlacement = .top
@@ -80,6 +81,19 @@ public struct FlowCanvas<
         self.edgeContentBuilder = { edge, geometry in AnyView(edgeContent(edge, geometry)) }
         self.nodeAccessoryBuilder = nil
         self.edgeAccessoryBuilder = nil
+    }
+
+    /// Places interactive content inside the Canvas platform event host.
+    ///
+    /// Content uses local screen coordinates, above the batch Canvas and below
+    /// live nodes and selection accessories. Unconsumed viewport events remain
+    /// in the host responder chain; scrollable controls retain their own input.
+    public func canvasOverlay<Overlay: View>(
+        @ViewBuilder content: @escaping () -> Overlay
+    ) -> FlowCanvas {
+        var copy = self
+        copy.canvasOverlayBuilder = { AnyView(content()) }
+        return copy
     }
 
     // MARK: - Accessory Modifiers
@@ -442,7 +456,11 @@ public struct FlowCanvas<
                 handleKeyDown(keyCode)
             }
         ) {
-            canvasView
+            canvasView.overlay {
+                if let canvasOverlayBuilder {
+                    canvasOverlayBuilder()
+                }
+            }
         }
 
         ZStack {
@@ -514,7 +532,11 @@ public struct FlowCanvas<
             registeredDropTypes: registeredDropTypes,
             onDrop: dropHandler
         ) {
-            canvasView
+            canvasView.overlay {
+                if let canvasOverlayBuilder {
+                    canvasOverlayBuilder()
+                }
+            }
         }
         .onContinuousHover { phase in
             switch phase {

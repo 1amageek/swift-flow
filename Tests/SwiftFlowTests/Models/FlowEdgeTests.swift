@@ -30,7 +30,6 @@ struct FlowEdgeTests {
             isSelected: true,
             label: "Label",
             waypoints: [.init(x: 30, y: 80), .init(x: 20, y: 60)],
-            sharpWaypointIndices: [1],
             bezierRoute: .init(sourceControlOffset: .init(x: 12, y: 0),
                 waypoints: [.init(point: .init(x: 40, y: 40), incomingControlOffset: .init(x: -12, y: 0),
                     outgoingControlOffset: .init(x: 12, y: 0))],
@@ -47,7 +46,6 @@ struct FlowEdgeTests {
         let json = #"{"id":"old","sourceNodeID":"source","targetNodeID":"target"}"#
         let decoded = try JSONDecoder().decode(FlowEdge.self, from: Data(json.utf8))
         #expect(decoded.waypoints.isEmpty)
-        #expect(decoded.sharpWaypointIndices.isEmpty)
         #expect(decoded.pathType == .bezier)
         #expect(decoded.bezierRoute == nil)
     }

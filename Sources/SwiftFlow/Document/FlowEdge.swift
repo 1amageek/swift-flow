@@ -9,10 +9,8 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
     public var targetHandleID: String?
     public var parentID: String?
     public var pathType: EdgePathType
-    /// Ordered canvas-space points, interpolated by cubic curves with the Bezier style.
+    /// Ordered canvas-space points of a polyline.
     public var waypoints: [CGPoint]
-    /// Zero-based indices whose joins stay sharp when the path style is Bezier.
-    public var sharpWaypointIndices: Set<Int>
     /// Independently controlled cubic geometry for the Bezier style.
     public var bezierRoute: EdgeBezierRoute?
     public var isSelected: Bool
@@ -30,7 +28,6 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         isSelected: Bool = false,
         label: String? = nil,
         waypoints: [CGPoint] = [],
-        sharpWaypointIndices: Set<Int> = [],
         bezierRoute: EdgeBezierRoute? = nil
     ) {
         self.id = id
@@ -41,7 +38,6 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         self.parentID = parentID
         self.pathType = pathType
         self.waypoints = waypoints
-        self.sharpWaypointIndices = sharpWaypointIndices
         self.bezierRoute = bezierRoute
         self.isSelected = isSelected
         self.isDropTarget = false
@@ -52,7 +48,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
 extension FlowEdge {
 
     private enum CodingKeys: String, CodingKey {
-        case id, sourceNodeID, sourceHandleID, targetNodeID, targetHandleID, parentID, pathType, isSelected, label, waypoints, sharpWaypointIndices, bezierRoute
+        case id, sourceNodeID, sourceHandleID, targetNodeID, targetHandleID, parentID, pathType, isSelected, label, waypoints, bezierRoute
     }
 
     public init(from decoder: Decoder) throws {
@@ -65,7 +61,6 @@ extension FlowEdge {
         parentID = try container.decodeIfPresent(String.self, forKey: .parentID)
         pathType = try container.decodeIfPresent(EdgePathType.self, forKey: .pathType) ?? .bezier
         waypoints = try container.decodeIfPresent([CGPoint].self, forKey: .waypoints) ?? []
-        sharpWaypointIndices = try container.decodeIfPresent(Set<Int>.self, forKey: .sharpWaypointIndices) ?? []
         bezierRoute = try container.decodeIfPresent(EdgeBezierRoute.self, forKey: .bezierRoute)
         isSelected = try container.decodeIfPresent(Bool.self, forKey: .isSelected) ?? false
         isDropTarget = false
@@ -82,9 +77,6 @@ extension FlowEdge {
         try container.encodeIfPresent(parentID, forKey: .parentID)
         try container.encode(pathType, forKey: .pathType)
         if !waypoints.isEmpty { try container.encode(waypoints, forKey: .waypoints) }
-        if !sharpWaypointIndices.isEmpty {
-            try container.encode(sharpWaypointIndices.sorted(), forKey: .sharpWaypointIndices)
-        }
         try container.encodeIfPresent(bezierRoute, forKey: .bezierRoute)
         try container.encode(isSelected, forKey: .isSelected)
         try container.encodeIfPresent(label, forKey: .label)

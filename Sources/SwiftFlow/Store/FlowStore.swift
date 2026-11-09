@@ -812,7 +812,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
             || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
             || old.pathType != new.pathType || old.waypoints != new.waypoints
-            || old.sharpWaypointIndices != new.sharpWaypointIndices || old.bezierRoute != new.bezierRoute {
+            || old.bezierRoute != new.bezierRoute {
             rebuildConnectionLookup()
         }
 
@@ -840,7 +840,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
             if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
                 || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
                 || old.pathType != new.pathType || old.waypoints != new.waypoints
-                || old.sharpWaypointIndices != new.sharpWaypointIndices || old.bezierRoute != new.bezierRoute {
+                || old.bezierRoute != new.bezierRoute {
                 anyTopologyChanged = true
             }
             changes.append(.replace(new))
@@ -1595,14 +1595,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
             return (path, source, target)
         }
         if !edge.waypoints.isEmpty {
-            let path = if edge.pathType == .bezier {
-                BezierEdgePath().path(
-                    from: source.point, through: edge.waypoints, to: target.point,
-                    sharpIndices: edge.sharpWaypointIndices)
-            } else {
-                WaypointEdgePath.path(from: source.point, through: edge.waypoints, to: target.point)
-            }
-            guard let path else { return nil }
+            guard let path = WaypointEdgePath.path(from: source.point, through: edge.waypoints, to: target.point)
+            else { return nil }
             return (path, source, target)
         }
         let path = Self.pathCalculator(for: edge.pathType).path(

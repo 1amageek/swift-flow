@@ -402,6 +402,9 @@ public struct FlowCanvas<
             #endif
         }
         .focusable()
+        #if os(macOS)
+        .focusEffectDisabled()
+        #endif
         .onAppear {
             store.undoManager = undoManager
         }

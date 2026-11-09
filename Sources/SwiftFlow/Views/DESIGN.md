@@ -31,6 +31,9 @@ unconsumed scroll events reach the existing macOS CanvasNSHostingView handler.
 Controls that consume scrolling (such as scroll views) keep their own behavior.
 The modifier does not transform coordinates or install event monitors.
 
+The macOS Canvas accepts keyboard focus without drawing a focus ring around
+the whole surface. Node and Edge selection belong to FlowStore.
+
 ## State, Ownership, and Lifecycle
 The builder is retained by the FlowCanvas value; native hosts update their
 existing root view. All callbacks follow SwiftUI/AppKit MainActor isolation.

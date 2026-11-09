@@ -19,6 +19,16 @@ FlowEdge + handle anchors -> FlowStore -> EdgePath -> drawing, labels, hit tests
 ```
 
 ## Contracts and Invariants
+A polyline uses ordered canvas-space points. An explicit cubic route uses
+`EdgeBezierRoute`, which owns its own ordered middle points. Each middle point
+has independent incoming and outgoing control offsets. The endpoint controls
+are offsets from the live handle anchors. Offsets set the direction and
+magnitude of the bow and are distinct from the points the path visits.
+Opposing collinear offsets give a visually smooth join. The explicit route
+applies to the Bezier style and takes precedence over the legacy waypoint list.
+The label and arrow are derived from the same cubic path used for drawing and
+hit testing. Nonfinite or degenerate geometry cannot produce an explicit path.
+
 An explicit route passes through its ordered waypoints between the live handle
 anchors. The cubic Bezier style interpolates the points with a shared tangent
 at each turn; straight portions keep their original track and exact reversals

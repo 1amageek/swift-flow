@@ -34,6 +34,44 @@ public struct BezierEdgePath: EdgePathCalculating, Sendable {
         return EdgePath(path: path, labelPosition: labelPosition)
     }
 
+    /// Resolves an explicit cubic route with independent controls at each middle point.
+    public func path(from source: CGPoint, to target: CGPoint, route: EdgeBezierRoute) -> EdgePath? {
+        guard source.x.isFinite, source.y.isFinite else { return nil }
+        var path = Path()
+        path.move(to: source)
+        var start = source
+        var outgoing = route.sourceControlOffset
+        var label = source
+        var longest: CGFloat = 0
+        var targetVector: CGVector?
+        for index in 0...route.waypoints.count {
+            let waypoint = index < route.waypoints.count ? route.waypoints[index] : nil
+            let end = waypoint?.point ?? target
+            let first = start + outgoing
+            let second = end + (waypoint?.incomingControlOffset ?? route.targetControlOffset)
+            guard [first, second, end].allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { return nil }
+            let chord = end - start
+            let length = hypot(chord.x, chord.y)
+            guard length.isFinite, length > 0 else { return nil }
+            path.addCurve(to: end, control1: first, control2: second)
+            if length > longest {
+                longest = length
+                label = cubicBezierPoint(t: 0.5, p0: start, p1: first, p2: second, p3: end)
+            }
+            if let waypoint {
+                start = end
+                outgoing = waypoint.outgoingControlOffset
+            } else {
+                let tangent = second == end ? (first == end ? chord : end - first) : end - second
+                let magnitude = hypot(tangent.x, tangent.y)
+                guard magnitude.isFinite, magnitude > 0 else { return nil }
+                let scaled = (tangent / magnitude) * length
+                targetVector = CGVector(dx: scaled.x, dy: scaled.y)
+            }
+        }
+        return EdgePath(path: path, labelPosition: label, targetVector: targetVector)
+    }
+
     func path(
         from source: CGPoint, through waypoints: [CGPoint], to target: CGPoint, sharpIndices: Set<Int>
     ) -> EdgePath? {

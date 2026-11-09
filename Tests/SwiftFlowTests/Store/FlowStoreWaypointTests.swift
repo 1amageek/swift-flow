@@ -104,6 +104,46 @@ struct FlowStoreWaypointTests {
         #expect(store.hitTestEdge(at: curveMidpoint, threshold: 0.25) == nil)
     }
 
+    @Test func independentBezierControlsChangeTheBowWithoutMovingWaypoints() throws {
+        let source = FlowNode(id: "source", position: .zero, size: .init(width: 20, height: 20), data: "")
+        let target = FlowNode(
+            id: "target", position: .init(x: 200, y: 0), size: .init(width: 20, height: 20), data: "")
+        let first = EdgeBezierWaypoint(
+            point: .init(x: 55, y: 10), incomingControlOffset: .init(x: -15, y: 0),
+            outgoingControlOffset: .init(x: 30, y: -80))
+        let second = EdgeBezierWaypoint(
+            point: .init(x: 155, y: 10), incomingControlOffset: .init(x: -30, y: -80),
+            outgoingControlOffset: .init(x: 15, y: 0))
+        let edge = FlowEdge(
+            id: "controlled", sourceNodeID: source.id, targetNodeID: target.id,
+            waypoints: [.init(x: 100, y: 75)],
+            bezierRoute: .init(sourceControlOffset: .init(x: 15, y: 0), waypoints: [first, second],
+                targetControlOffset: .init(x: -15, y: 0)))
+        let store = FlowStore(nodes: [source, target], edges: [edge])
+        let curved = try #require(store.edgePath(for: edge))
+        var visits: [CGPoint] = []
+        curved.path.forEach { element in
+            if case .curve(to: let end, control1: _, control2: _) = element { visits.append(end) }
+        }
+        #expect(visits == [first.point, second.point, .init(x: 210, y: 10)])
+        #expect(curved.labelPosition == .init(x: 105, y: -50))
+        #expect(store.hitTestEdge(at: curved.labelPosition, threshold: 0.5) == edge.id)
+
+        store.updateEdge(edge.id) {
+            $0.bezierRoute?.waypoints[0].outgoingControlOffset.y = -20
+            $0.bezierRoute?.waypoints[1].incomingControlOffset.y = -20
+        }
+        var updated = try #require(store.edgesForNode(source.id).first)
+        #expect(updated.bezierRoute?.waypoints.map(\.point) == [first.point, second.point])
+        #expect(store.edgePath(for: updated)?.labelPosition == .init(x: 105, y: -5))
+        #expect(store.hitTestEdge(at: curved.labelPosition, threshold: 0.5) == nil)
+        updated.pathType = .straight
+        #expect(store.edgePath(for: updated)?.path.boundingRect.maxY == 75)
+        updated.pathType = .bezier
+        updated.bezierRoute?.sourceControlOffset.x = .infinity
+        #expect(store.edgePath(for: updated) == nil)
+    }
+
     @Test func fitIncludesWaypointsOutsideTheNodeBounds() {
         let source = FlowNode(id: "source", position: .zero, data: "")
         let target = FlowNode(id: "target", position: .init(x: 200, y: 0), data: "")

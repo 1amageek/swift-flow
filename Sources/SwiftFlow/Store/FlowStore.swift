@@ -812,7 +812,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
             || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
             || old.pathType != new.pathType || old.waypoints != new.waypoints
-            || old.sharpWaypointIndices != new.sharpWaypointIndices {
+            || old.sharpWaypointIndices != new.sharpWaypointIndices || old.bezierRoute != new.bezierRoute {
             rebuildConnectionLookup()
         }
 
@@ -840,7 +840,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
             if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
                 || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
                 || old.pathType != new.pathType || old.waypoints != new.waypoints
-                || old.sharpWaypointIndices != new.sharpWaypointIndices {
+                || old.sharpWaypointIndices != new.sharpWaypointIndices || old.bezierRoute != new.bezierRoute {
                 anyTopologyChanged = true
             }
             changes.append(.replace(new))
@@ -1589,6 +1589,11 @@ public final class FlowStore<Data: Sendable & Hashable> {
               let target = handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
         else { return nil }
 
+        if edge.pathType == .bezier, let route = edge.bezierRoute {
+            guard let path = BezierEdgePath().path(from: source.point, to: target.point, route: route)
+            else { return nil }
+            return (path, source, target)
+        }
         if !edge.waypoints.isEmpty {
             let path = if edge.pathType == .bezier {
                 BezierEdgePath().path(
@@ -1638,7 +1643,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     private func contentBounds() -> CGRect {
         var bounds = nodeBounds()
-        for edge in edges where !edge.waypoints.isEmpty {
+        for edge in edges where !edge.waypoints.isEmpty || edge.bezierRoute != nil {
             guard let path = edgePath(for: edge), !path.path.isEmpty else { continue }
             bounds = bounds.union(path.path.boundingRect)
         }

@@ -30,7 +30,11 @@ struct FlowEdgeTests {
             isSelected: true,
             label: "Label",
             waypoints: [.init(x: 30, y: 80), .init(x: 20, y: 60)],
-            sharpWaypointIndices: [1]
+            sharpWaypointIndices: [1],
+            bezierRoute: .init(sourceControlOffset: .init(x: 12, y: 0),
+                waypoints: [.init(point: .init(x: 40, y: 40), incomingControlOffset: .init(x: -12, y: 0),
+                    outgoingControlOffset: .init(x: 12, y: 0))],
+                targetControlOffset: .init(x: -12, y: 0))
         )
         let encoder = JSONEncoder()
         let data = try encoder.encode(edge)
@@ -45,6 +49,7 @@ struct FlowEdgeTests {
         #expect(decoded.waypoints.isEmpty)
         #expect(decoded.sharpWaypointIndices.isEmpty)
         #expect(decoded.pathType == .bezier)
+        #expect(decoded.bezierRoute == nil)
     }
 
     @Test("Hashable conformance")

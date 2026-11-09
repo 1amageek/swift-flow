@@ -811,7 +811,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
         if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
             || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
-            || old.waypoints != new.waypoints {
+            || old.pathType != new.pathType || old.waypoints != new.waypoints
+            || old.sharpWaypointIndices != new.sharpWaypointIndices {
             rebuildConnectionLookup()
         }
 
@@ -838,7 +839,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
             if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
                 || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
-                || old.waypoints != new.waypoints {
+                || old.pathType != new.pathType || old.waypoints != new.waypoints
+                || old.sharpWaypointIndices != new.sharpWaypointIndices {
                 anyTopologyChanged = true
             }
             changes.append(.replace(new))
@@ -1588,8 +1590,14 @@ public final class FlowStore<Data: Sendable & Hashable> {
         else { return nil }
 
         if !edge.waypoints.isEmpty {
-            guard let path = WaypointEdgePath.path(from: source.point, through: edge.waypoints, to: target.point)
-            else { return nil }
+            let path = if edge.pathType == .bezier {
+                BezierEdgePath().path(
+                    from: source.point, through: edge.waypoints, to: target.point,
+                    sharpIndices: edge.sharpWaypointIndices)
+            } else {
+                WaypointEdgePath.path(from: source.point, through: edge.waypoints, to: target.point)
+            }
+            guard let path else { return nil }
             return (path, source, target)
         }
         let path = Self.pathCalculator(for: edge.pathType).path(

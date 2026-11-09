@@ -29,7 +29,8 @@ struct FlowEdgeTests {
             pathType: .smoothStep,
             isSelected: true,
             label: "Label",
-            waypoints: [.init(x: 30, y: 80), .init(x: 20, y: 60)]
+            waypoints: [.init(x: 30, y: 80), .init(x: 20, y: 60)],
+            sharpWaypointIndices: [1]
         )
         let encoder = JSONEncoder()
         let data = try encoder.encode(edge)
@@ -42,6 +43,7 @@ struct FlowEdgeTests {
         let json = #"{"id":"old","sourceNodeID":"source","targetNodeID":"target"}"#
         let decoded = try JSONDecoder().decode(FlowEdge.self, from: Data(json.utf8))
         #expect(decoded.waypoints.isEmpty)
+        #expect(decoded.sharpWaypointIndices.isEmpty)
         #expect(decoded.pathType == .bezier)
     }
 

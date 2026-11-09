@@ -49,3 +49,8 @@ Verification receipt (2026-11-09): bounded macOS `swift test` passed205tests in
 arm64/x86_64. Vision Studio's actual SwiftUI Edge button scrolled its Canvas,
 opened the output Grid and returned successfully. This qualifies native wheel
 routing, not physical trackpad gestures or iOS runtime interaction.
+
+## Routed Edge rendering
+The default Canvas draws the resolved path and, for waypoint routes, an
+arrowhead aligned to its last segment. It culls against the path bounds.
+Custom Edge symbols receive the same path in symbol-local coordinates.

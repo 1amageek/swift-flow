@@ -6,9 +6,17 @@ public struct EdgePath: Sendable {
     public let labelPosition: CGPoint
     public let labelAngle: Angle
 
+    /// Vector of the final segment of an explicit route, in canvas space.
+    public let targetVector: CGVector?
+
     public init(path: Path, labelPosition: CGPoint, labelAngle: Angle = .zero) {
+        self.init(path: path, labelPosition: labelPosition, labelAngle: labelAngle, targetVector: nil)
+    }
+
+    init(path: Path, labelPosition: CGPoint, labelAngle: Angle = .zero, targetVector: CGVector?) {
         self.path = path
         self.labelPosition = labelPosition
         self.labelAngle = labelAngle
+        self.targetVector = targetVector
     }
 }

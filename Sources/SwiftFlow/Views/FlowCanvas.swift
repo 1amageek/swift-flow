@@ -742,29 +742,27 @@ public struct FlowCanvas<
         var dropTargetPath = Path()
         var labelsToDraw: [(String, CGPoint)] = []
 
+        let visibleBounds = CGRect(origin: .zero, size: canvasSize).insetBy(dx: -100, dy: -100)
         for edge in store.edges {
-            let sourceInfo = store.handleInfo(nodeID: edge.sourceNodeID, handleID: edge.sourceHandleID)
-            let targetInfo = store.handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
-            guard let source = sourceInfo, let target = targetInfo else { continue }
+            guard let geometry = store.resolvedEdgePath(for: edge) else { continue }
+            let edgePath = geometry.path
+            let bounds = edgePath.path.boundingRect
+            let screenBounds = CGRect(
+                origin: viewport.canvasToScreen(bounds.origin),
+                size: CGSize(width: bounds.width * viewport.zoom, height: bounds.height * viewport.zoom))
+            guard visibleBounds.intersects(screenBounds) else { continue }
 
-            // Viewport culling (screen space)
-            let screenSource = viewport.canvasToScreen(source.point)
-            let screenTarget = viewport.canvasToScreen(target.point)
-            let margin: CGFloat = 100
-            if (screenSource.x < -margin && screenTarget.x < -margin) ||
-               (screenSource.x > canvasSize.width + margin && screenTarget.x > canvasSize.width + margin) ||
-               (screenSource.y < -margin && screenTarget.y < -margin) ||
-               (screenSource.y > canvasSize.height + margin && screenTarget.y > canvasSize.height + margin) {
-                continue
+            var transformed = transformedPath(edgePath.path, viewport: viewport)
+            if let vector = edgePath.targetVector {
+                let tip = viewport.canvasToScreen(geometry.target.point)
+                let length = hypot(vector.dx, vector.dy)
+                let back = min(9, length * viewport.zoom) / length
+                let wing = back * 0.55
+                let base = CGPoint(x: tip.x - vector.dx * back, y: tip.y - vector.dy * back)
+                transformed.move(to: CGPoint(x: base.x - vector.dy * wing, y: base.y + vector.dx * wing))
+                transformed.addLine(to: tip)
+                transformed.addLine(to: CGPoint(x: base.x + vector.dy * wing, y: base.y - vector.dx * wing))
             }
-
-            let calculator = FlowStore<NodeData>.pathCalculator(for: edge.pathType)
-            let edgePath = calculator.path(
-                from: source.point, sourcePosition: source.position,
-                to: target.point, targetPosition: target.position
-            )
-
-            let transformed = transformedPath(edgePath.path, viewport: viewport)
 
             if edge.isDropTarget {
                 dropTargetPath.addPath(transformed)
@@ -1214,15 +1212,7 @@ public struct FlowCanvas<
     }
 
     private func computeEdgeGeometry(for edge: FlowEdge) -> EdgeGeometry? {
-        guard let source = store.handleInfo(nodeID: edge.sourceNodeID, handleID: edge.sourceHandleID),
-              let target = store.handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
-        else { return nil }
-
-        let calculator = FlowStore<NodeData>.pathCalculator(for: edge.pathType)
-        let edgePath = calculator.path(
-            from: source.point, sourcePosition: source.position,
-            to: target.point, targetPosition: target.position
-        )
+        guard let (edgePath, source, target) = store.resolvedEdgePath(for: edge) else { return nil }
 
         let rawBounds = edgePath.path.boundingRect.insetBy(dx: -20, dy: -20)
         let offset = CGAffineTransform(translationX: -rawBounds.origin.x, y: -rawBounds.origin.y)

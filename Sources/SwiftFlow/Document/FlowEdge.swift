@@ -9,6 +9,8 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
     public var targetHandleID: String?
     public var parentID: String?
     public var pathType: EdgePathType
+    /// Ordered canvas-space points. A nonempty list overrides the path style.
+    public var waypoints: [CGPoint]
     public var isSelected: Bool
     public var isDropTarget: Bool
     public var label: String?
@@ -22,7 +24,8 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         parentID: String? = nil,
         pathType: EdgePathType = .bezier,
         isSelected: Bool = false,
-        label: String? = nil
+        label: String? = nil,
+        waypoints: [CGPoint] = []
     ) {
         self.id = id
         self.sourceNodeID = sourceNodeID
@@ -31,6 +34,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
         self.targetHandleID = targetHandleID
         self.parentID = parentID
         self.pathType = pathType
+        self.waypoints = waypoints
         self.isSelected = isSelected
         self.isDropTarget = false
         self.label = label
@@ -40,7 +44,7 @@ public struct FlowEdge: Identifiable, Sendable, Hashable, Codable {
 extension FlowEdge {
 
     private enum CodingKeys: String, CodingKey {
-        case id, sourceNodeID, sourceHandleID, targetNodeID, targetHandleID, parentID, pathType, isSelected, label
+        case id, sourceNodeID, sourceHandleID, targetNodeID, targetHandleID, parentID, pathType, isSelected, label, waypoints
     }
 
     public init(from decoder: Decoder) throws {
@@ -52,6 +56,7 @@ extension FlowEdge {
         targetHandleID = try container.decodeIfPresent(String.self, forKey: .targetHandleID)
         parentID = try container.decodeIfPresent(String.self, forKey: .parentID)
         pathType = try container.decodeIfPresent(EdgePathType.self, forKey: .pathType) ?? .bezier
+        waypoints = try container.decodeIfPresent([CGPoint].self, forKey: .waypoints) ?? []
         isSelected = try container.decodeIfPresent(Bool.self, forKey: .isSelected) ?? false
         isDropTarget = false
         label = try container.decodeIfPresent(String.self, forKey: .label)
@@ -66,6 +71,7 @@ extension FlowEdge {
         try container.encodeIfPresent(targetHandleID, forKey: .targetHandleID)
         try container.encodeIfPresent(parentID, forKey: .parentID)
         try container.encode(pathType, forKey: .pathType)
+        if !waypoints.isEmpty { try container.encode(waypoints, forKey: .waypoints) }
         try container.encode(isSelected, forKey: .isSelected)
         try container.encodeIfPresent(label, forKey: .label)
     }

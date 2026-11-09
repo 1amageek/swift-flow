@@ -810,7 +810,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
         guard old != new else { return }
 
         if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
-            || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID {
+            || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
+            || old.waypoints != new.waypoints {
             rebuildConnectionLookup()
         }
 
@@ -836,7 +837,8 @@ public final class FlowStore<Data: Sendable & Hashable> {
             guard old != new else { continue }
 
             if old.sourceNodeID != new.sourceNodeID || old.targetNodeID != new.targetNodeID
-                || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID {
+                || old.sourceHandleID != new.sourceHandleID || old.targetHandleID != new.targetHandleID
+                || old.waypoints != new.waypoints {
                 anyTopologyChanged = true
             }
             changes.append(.replace(new))
@@ -1095,24 +1097,16 @@ public final class FlowStore<Data: Sendable & Hashable> {
     }
 
     private func edgeIntersectsRect(_ edge: FlowEdge, rect: CGRect) -> Bool {
-        guard let source = handleInfo(nodeID: edge.sourceNodeID, handleID: edge.sourceHandleID),
-              let target = handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
-        else { return false }
-
-        let calculator = Self.pathCalculator(for: edge.pathType)
-        let edgePath = calculator.path(
-            from: source.point, sourcePosition: source.position,
-            to: target.point, targetPosition: target.position
-        )
+        guard let edgePath = edgePath(for: edge) else { return false }
 
         let pathBounds = edgePath.path.boundingRect
-        guard rect.intersects(pathBounds) else { return false }
+        guard rect.intersects(pathBounds.insetBy(dx: -1, dy: -1)) else { return false }
 
         let strokedPath = edgePath.path.strokedPath(StrokeStyle(lineWidth: 2))
         let rectPath = Path(rect)
 
         let intersection = strokedPath.intersection(rectPath)
-        return !intersection.isEmpty
+        return !intersection.cgPath.isEmpty
     }
 
     // MARK: - Hover
@@ -1191,7 +1185,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
         guard !nodes.isEmpty else { return }
         viewportAnimations = (nil, nil, nil)
         zoomAnchorState = nil
-        let bounds = nodeBounds()
+        let bounds = contentBounds()
         let contentWidth = bounds.width + padding * 2
         let contentHeight = bounds.height + padding * 2
         guard contentWidth > 0, contentHeight > 0 else { return }
@@ -1261,14 +1255,14 @@ public final class FlowStore<Data: Sendable & Hashable> {
         startAnimationLoopIfNeeded()
     }
 
-    /// Fits the viewport to show all nodes with an animation.
+    /// Fits the viewport to show all nodes and explicit routes with an animation.
     ///
     /// When zoom changes, offset is derived from zoom each frame (same as
     /// `zoom(by:anchor:animation:)`) to prevent wobble caused by independent
     /// offset/zoom animations settling at different times.
     public func fitToContent(canvasSize: CGSize, padding: CGFloat = 50, animation: FlowAnimation) {
         guard !nodes.isEmpty else { return }
-        let bounds = nodeBounds()
+        let bounds = contentBounds()
         let contentWidth = bounds.width + padding * 2
         let contentHeight = bounds.height + padding * 2
         guard contentWidth > 0, contentHeight > 0 else { return }
@@ -1575,20 +1569,33 @@ public final class FlowStore<Data: Sendable & Hashable> {
 
     func hitTestEdge(at canvasPoint: CGPoint, threshold: CGFloat = 5) -> String? {
         for edge in edges.reversed() {
-            let sourceInfo = handleInfo(nodeID: edge.sourceNodeID, handleID: edge.sourceHandleID)
-            let targetInfo = handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
-            guard let source = sourceInfo, let target = targetInfo else { continue }
-
-            let calculator = Self.pathCalculator(for: edge.pathType)
-            let edgePath = calculator.path(
-                from: source.point, sourcePosition: source.position,
-                to: target.point, targetPosition: target.position
-            )
+            guard let edgePath = edgePath(for: edge) else { continue }
             if GeometryHelpers.pointOnPath(edgePath.path, point: canvasPoint, tolerance: threshold) {
                 return edge.id
             }
         }
         return nil
+    }
+
+    /// Resolves the same canvas-space geometry used by rendering and selection.
+    public func edgePath(for edge: FlowEdge) -> EdgePath? {
+        resolvedEdgePath(for: edge)?.path
+    }
+
+    func resolvedEdgePath(for edge: FlowEdge) -> (path: EdgePath, source: HandleInfo, target: HandleInfo)? {
+        guard let source = handleInfo(nodeID: edge.sourceNodeID, handleID: edge.sourceHandleID),
+              let target = handleInfo(nodeID: edge.targetNodeID, handleID: edge.targetHandleID)
+        else { return nil }
+
+        if !edge.waypoints.isEmpty {
+            guard let path = WaypointEdgePath.path(from: source.point, through: edge.waypoints, to: target.point)
+            else { return nil }
+            return (path, source, target)
+        }
+        let path = Self.pathCalculator(for: edge.pathType).path(
+            from: source.point, sourcePosition: source.position,
+            to: target.point, targetPosition: target.position)
+        return (path, source, target)
     }
 
     public static func pathCalculator(for type: EdgePathType) -> any EdgePathCalculating {
@@ -1619,6 +1626,15 @@ public final class FlowStore<Data: Sendable & Hashable> {
             maxY = max(maxY, node.position.y + node.size.height)
         }
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func contentBounds() -> CGRect {
+        var bounds = nodeBounds()
+        for edge in edges where !edge.waypoints.isEmpty {
+            guard let path = edgePath(for: edge), !path.path.isEmpty else { continue }
+            bounds = bounds.union(path.path.boundingRect)
+        }
+        return bounds
     }
 
     private func union(_ rects: [CGRect]) -> CGRect? {
@@ -1690,13 +1706,7 @@ public final class FlowStore<Data: Sendable & Hashable> {
     // MARK: - Private
 
     private func handlePoint(for position: HandlePosition, in node: FlowNode<Data>) -> CGPoint {
-        switch position {
-        case .center: CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y + node.size.height / 2)
-        case .top:    CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y)
-        case .bottom: CGPoint(x: node.position.x + node.size.width / 2, y: node.position.y + node.size.height)
-        case .left:   CGPoint(x: node.position.x, y: node.position.y + node.size.height / 2)
-        case .right:  CGPoint(x: node.position.x + node.size.width, y: node.position.y + node.size.height / 2)
-        }
+        position.anchor(in: node.frame)
     }
 
     private func hitDistance(

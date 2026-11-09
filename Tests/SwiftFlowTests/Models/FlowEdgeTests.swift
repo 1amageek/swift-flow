@@ -28,13 +28,21 @@ struct FlowEdgeTests {
             targetHandleID: "in",
             pathType: .smoothStep,
             isSelected: true,
-            label: "Label"
+            label: "Label",
+            waypoints: [.init(x: 30, y: 80), .init(x: 20, y: 60)]
         )
         let encoder = JSONEncoder()
         let data = try encoder.encode(edge)
         let decoder = JSONDecoder()
         let decoded = try decoder.decode(FlowEdge.self, from: data)
         #expect(decoded == edge)
+    }
+
+    @Test func legacyDocumentHasNoWaypoints() throws {
+        let json = #"{"id":"old","sourceNodeID":"source","targetNodeID":"target"}"#
+        let decoded = try JSONDecoder().decode(FlowEdge.self, from: Data(json.utf8))
+        #expect(decoded.waypoints.isEmpty)
+        #expect(decoded.pathType == .bezier)
     }
 
     @Test("Hashable conformance")

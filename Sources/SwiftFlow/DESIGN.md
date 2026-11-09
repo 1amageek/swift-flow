@@ -29,3 +29,9 @@ No global event monitor or separate viewport state is introduced.
 [CanvasOverlayTests](../../Tests/SwiftFlowTests/Views/CanvasOverlayTests.swift)
 verifies native hit testing, click actions and real scroll-event propagation to
 FlowStore. Changes to host composition require package and client revalidation.
+
+## Explicit Edge routes
+[EdgePaths](EdgePaths/DESIGN.md) defines the geometry contract for ordered
+waypoints. FlowStore resolves handles and exposes the resulting canvas path
+to the Canvas and clients. The document stores waypoints in order and decodes
+older Edges with an empty list. Fit includes the extent of explicit routes.

@@ -15,7 +15,7 @@ Edges are batch-drawn via `GraphicsContext` for performance. Nodes are rendered 
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.21.4")
+    .package(url: "https://github.com/1amageek/swift-flow.git", from: "0.22.0")
 ]
 ```
 
@@ -148,6 +148,18 @@ FlowEdge(
 ```
 
 Edge animation is managed separately via the store's `animatedEdgeIDs` side-table — see [Edge Animation](#edge-animation).
+
+#### Routed edges
+
+Set `FlowEdge.waypoints` to an ordered list of canvas-space points for a
+polyline between the live handle anchors. For a custom cubic path, set
+`pathType: .bezier` and supply an `EdgeBezierRoute`. Its source and target
+controls are offsets from the live handle anchors. Each `EdgeBezierWaypoint`
+is an on-curve point with its own incoming and outgoing control offsets.
+
+An explicit cubic route takes precedence for `.bezier` edges. The store uses
+the resolved path for drawing, labels, and hit testing. Call
+`store.edgePath(for: edge)` to anchor custom overlays to that same geometry.
 
 ### FlowCanvas
 
